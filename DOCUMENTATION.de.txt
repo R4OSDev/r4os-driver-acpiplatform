@@ -1,0 +1,27 @@
+﻿ACPIPLAT / AcpiPlatform0.1.0
+============================
+Rolle: externer R4D-Eingabetreiber. Kanonisches Projekt R4OSDev/r4os-driver-acpiplatform.
+Liefert standardisierte ACPI-/EC-Deckel- und Helligkeitsereignisse. Kernel-
+vertrag, Quiesce, Quellen und Grenzen: Docs/Drivers/AMDLaptop08035.txt im Docs-
+Repository. Kein Systemsuspend, keine Batterie-/Thermal-/Vendor-Fn-Policy.
+
+Linux: ./Build.sh beziehungsweise ./Build.sh test.
+Windows: Build.bat beziehungsweise Build.bat test.
+Gemeinsame PowerShell7-/SDK-Orchestrierung; lokale Settings.R4S bleibt ignoriert.
+Der normale Modulbuild benoetigt nur den DevKit-Zig/C-Compiler. Der Hosttest
+enthaelt das originale ASL und den daraus erzeugten Bytearray samt SHA256.
+Nur bei Aenderungen der Fixture wird iasl gebraucht; kein Fremdfirmwaredump.
+Produkt-C-Code verwendet das grosse x86_64-Codemodell ohne PIC fuer die
+unterstuetzten R4M0-Relocations. Hosttests verwenden das native Hostziel.
+
+ACPIPLAT.R4D ist IMAGE_SCOPE=none. Zur expliziten Installation den Treiber im
+Image-/Updateplan aufnehmen und DRIVER=ACPIPLAT in CONFIG.R4S setzen. Die
+Plattform muss DriverResourceApi.platform_query und R4SYS Slot154 besitzen.
+Start ist asynchron; das Log namespace ready und der R4SYS-Quellensnapshot
+zeigen den tatsaechlichen Erfolg. R4D-Init allein ist keine AML-Abnahme.
+Shutdown bindet Input-Treiber an den normalen Systemtransitionpfad.
+
+uACPI6.1.0 / f5f6cc29f85dd5db0dd79c47700c8f3ebce18be4 ist unveraendertes
+MIT-Material. Herkunft und Archivhash: ThirdParty/uACPI/Provenance.json.
+Originale Portbruecke, EC-Protokoll und synthetische Tests: Apache-2.0.
+Reale EC-/Fn-/Deckel-/Panelpruefungen erst in Roadmap0.80.39.
