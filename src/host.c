@@ -9,6 +9,9 @@
 typedef struct { uacpi_work_handler fn; void *ctx; } Work;
 typedef struct { Work items[256]; unsigned head, count, active; } Queue;
 static Queue queues[2];
+// Binary permits coalesce notifications. Queue/pending state is authoritative;
+// a permit published between the empty check and acquire stays available.
+static uint64_t events[4];
 static unsigned char guard;
 static unsigned stop_workers, fault;
 static uacpi_interrupt_handler sci;
@@ -22,29 +25,52 @@ static uint64_t lock(void) {
 static void unlock(uint64_t flags) {
     __atomic_clear(&guard, __ATOMIC_RELEASE); r4_irq_restore(flags);
 }
-void r4_host_reset(void) {
+void r4_host_release(void) {
+    // Only after every callback producer and all four workers were joined.
+    for(unsigned i=0;i<4;i++)if(events[i]){r4_destroy(events[i]);events[i]=0;}
+}
+int r4_host_reset(void) {
     // Only before starting any task, after the previous instance was joined.
     for (unsigned i=0;i<2;i++) queues[i]=(Queue){0};
     guard=0; sci=0; sci_context=0; sci_active=0; fault=0; stop_workers=0;
+    for(unsigned i=0;i<4;i++) {
+        events[i]=r4_semaphore(0,1);
+        if(!events[i]){r4_host_release();return -1;}
+    }
+    return 0;
 }
-void r4_host_stop(void) { __atomic_store_n(&stop_workers,1,__ATOMIC_RELEASE); }
+void r4_host_wake(uint32_t kind) {if(kind<4&&events[kind])r4_release(events[kind]);}
+void r4_host_stop(void) {
+    __atomic_store_n(&stop_workers,1,__ATOMIC_RELEASE);
+    for(unsigned i=0;i<4;i++)r4_host_wake(i);
+}
+int r4_host_wait(uint32_t kind,uint16_t ms) {
+    if(kind>=4||!events[kind])return -1;
+    int rc=r4_acquire(events[kind],ms);
+    if(rc<0){__atomic_store_n(&fault,1,__ATOMIC_RELEASE);r4_host_stop();}
+    return rc;
+}
 int r4_host_fault(void) { return __atomic_load_n(&fault,__ATOMIC_ACQUIRE)!=0; }
 int r4_host_worker(uint32_t kind) {
     if (kind > 2) return -1;
-    while (!__atomic_load_n(&stop_workers,__ATOMIC_ACQUIRE)) {
+    for (;;) {
         uint64_t flags=lock();
         if (kind==2) {
+            if(__atomic_load_n(&stop_workers,__ATOMIC_ACQUIRE)){unlock(flags);break;}
             uacpi_interrupt_handler fn=sci; void *ctx=sci_context;
             if (fn) sci_active++;
             unlock(flags);
             if (fn) { fn(ctx); flags=lock(); sci_active--; unlock(flags); }
-            r4_sleep(10);
+            // No SCI IRQ transport is exposed by DriverPlatformApi. Preserve
+            // the 10-ms status/ack fallback only while a handler is installed.
+            if(r4_host_wait(2,fn?10:UINT16_MAX)<0)return -1;
         } else {
             Queue *q=&queues[kind]; Work work={0};
             if(q->count) {work=q->items[q->head];q->head=(q->head+1)%256;q->count--;q->active++;}
+            else if(__atomic_load_n(&stop_workers,__ATOMIC_ACQUIRE)){unlock(flags);break;}
             unlock(flags);
             if(work.fn) {work.fn(work.ctx);flags=lock();q->active--;unlock(flags);}
-            else r4_sleep(2);
+            else if(r4_host_wait(kind,UINT16_MAX)!=0)return -1;
         }
     }
     return 0;
@@ -100,12 +126,12 @@ uacpi_status uacpi_kernel_handle_firmware_request(uacpi_firmware_request *req) {
 uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq,uacpi_interrupt_handler fn,uacpi_handle ctx,uacpi_handle *out) {
     (void)irq;
     uint64_t f=lock();if(sci){unlock(f);return UACPI_STATUS_ALREADY_EXISTS;}
-    sci=fn;sci_context=ctx;*out=&sci;unlock(f);return UACPI_STATUS_OK;
+    sci=fn;sci_context=ctx;*out=&sci;unlock(f);r4_host_wake(2);return UACPI_STATUS_OK;
 }
 uacpi_status uacpi_kernel_uninstall_interrupt_handler(uacpi_interrupt_handler fn,uacpi_handle h) {
     uint64_t f=lock();
     if(h!=&sci||sci!=fn){unlock(f);return UACPI_STATUS_INVALID_ARGUMENT;}
-    sci=0;sci_context=0;unlock(f);
+    sci=0;sci_context=0;unlock(f);r4_host_wake(2);
     // A timeout cannot authorize uACPI to free a callback still in use.
     for(;;){f=lock();unsigned n=sci_active;unlock(f);if(!n)break;r4_sleep(1);}
     return UACPI_STATUS_OK;
@@ -114,7 +140,8 @@ uacpi_status uacpi_kernel_schedule_work(uacpi_work_type type,uacpi_work_handler 
     if((unsigned)type>1||!fn)return UACPI_STATUS_INVALID_ARGUMENT;
     uint64_t f=lock();Queue *q=&queues[type];
     if(q->count==256||__atomic_load_n(&stop_workers,__ATOMIC_ACQUIRE)){__atomic_store_n(&fault,1,__ATOMIC_RELEASE);unlock(f);return UACPI_STATUS_OUT_OF_MEMORY;}
-    q->items[(q->head+q->count)%256]=(Work){fn,ctx};q->count++;unlock(f);return UACPI_STATUS_OK;
+    q->items[(q->head+q->count)%256]=(Work){fn,ctx};q->count++;unlock(f);
+    r4_host_wake(type);return UACPI_STATUS_OK;
 }
 uacpi_status uacpi_kernel_wait_for_work_completion(void) {
     for(;;) {

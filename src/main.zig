@@ -10,7 +10,8 @@ var threads: r.r4dev.DriverThreadContext = undefined;
 var semaphores: r.r4dev.DriverSemaphoreContext = undefined;
 var handles: [4]u64 = @splat(0);
 var started: bool = false;
-extern fn r4_host_reset() void;
+extern fn r4_host_reset() c_int;
+extern fn r4_host_release() void;
 extern fn r4_host_stop() void;
 extern fn r4_host_worker(u32) c_int;
 extern fn r4_platform_run() c_int;
@@ -28,7 +29,8 @@ export fn acpiplat_init(api: *const r.r4dev.DriverApi) callconv(.c) i32 {
     threads = driver.threads() orelse return -1;
     semaphores = driver.semaphores() orelse return -1;
     if (platform.rsdp() == 0 or resources.nowNs() == 0 or resources.nowNs() == std.math.maxInt(u64) or driver.timerFrequency() == 0) return -1;
-    r4_host_reset(); r4_platform_reset();
+    if (r4_host_reset() != 0) return -1;
+    r4_platform_reset();
     started = true;
     for (0..handles.len) |i| {
         // No parallel flag: firmware AML and the polling SCI stay on CPU0.
@@ -58,6 +60,7 @@ export fn acpiplat_shutdown() callconv(.c) i32 {
         if (threads.join(handle.*, ticks(1000), &result) != 0 or threads.release(handle.*) != 0) return -1;
         handle.* = 0;
     };
+    r4_host_release();
     _ = platform.input(a.platform_input_kind_capabilities, 0);
     if (r4_platform_shutdown_status() != 0) return -1;
     started = false; return 0;

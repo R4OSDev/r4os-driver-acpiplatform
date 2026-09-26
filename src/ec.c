@@ -127,6 +127,7 @@ static uacpi_iteration_decision resource(void *context,uacpi_resource *r) {
 static uacpi_interrupt_ret gpe(void *context,uacpi_namespace_node *node,uacpi_u16 idx) {
     (void)node;(void)idx;Ec *e=context;
     __atomic_store_n(&e->pending,1,__ATOMIC_RELEASE);
+    r4_host_wake(3);
     return UACPI_INTERRUPT_HANDLED; // reenable only after the query worker
 }
 static uacpi_iteration_decision discover(void *context,uacpi_namespace_node *node,uacpi_u32 depth) {
@@ -197,6 +198,16 @@ void r4_ec_poll(void) {
         if(!more&&!__atomic_load_n(&e->failed,__ATOMIC_ACQUIRE)&&__atomic_exchange_n(&e->pending,0,__ATOMIC_ACQ_REL))
             uacpi_finish_handling_gpe(e->gpe_node,e->gpe);
     }
+}
+uint16_t r4_ec_poll_interval_ms(void) {
+    for(unsigned i=0;i<count;i++) {
+        Ec *e=&controllers[i];
+        if(e->node&&!__atomic_load_n(&e->failed,__ATOMIC_ACQUIRE)&&
+           (!e->gpe_installed||__atomic_load_n(&e->pending,__ATOMIC_ACQUIRE)))return 10;
+    }
+    // GPE publication wakes immediately; retain a bounded firmware safety
+    // sample even if a controller fails to emit its declared event.
+    return 1000;
 }
 void r4_ec_stop(void) {
     stopping=1;

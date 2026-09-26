@@ -14,7 +14,7 @@ void r4_platform_reset(void) {
     shutdown_status=0;stop_requested=0;ready=0;capabilities=0;lid=0;video_count=0;adapter_count=0;discovery_failure=0;
 }
 int r4_platform_shutdown_status(void) {return __atomic_load_n(&shutdown_status,__ATOMIC_ACQUIRE);}
-void r4_platform_stop(void) {__atomic_store_n(&stop_requested,1,__ATOMIC_RELEASE);}
+void r4_platform_stop(void) {__atomic_store_n(&stop_requested,1,__ATOMIC_RELEASE);r4_host_wake(3);}
 static void sample_lid(void) {
     if(!lid)return;
     uacpi_u64 value=0;uacpi_status rc=uacpi_eval_simple_integer(lid,"_LID",&value);
@@ -95,8 +95,14 @@ int r4_platform_run(void) {
     uint64_t next_lid=r4_now()+1000000000;
     while(!__atomic_load_n(&stop_requested,__ATOMIC_ACQUIRE)&&!r4_host_fault()) {
         r4_ec_poll();
-        if(lid&&r4_now()>=next_lid){sample_lid();next_lid=r4_now()+1000000000;}
-        r4_sleep(10);
+        uint64_t now=r4_now();
+        if(lid&&now>=next_lid){sample_lid();now=r4_now();next_lid=now+1000000000;}
+        uint16_t interval=r4_ec_poll_interval_ms();
+        if(lid) {
+            uint64_t remaining=(next_lid-now+999999)/1000000;
+            if(remaining<interval)interval=remaining?remaining:1;
+        }
+        if(r4_host_wait(3,interval)<0)break;
     }
     if(r4_host_fault())result=-1;
 done:

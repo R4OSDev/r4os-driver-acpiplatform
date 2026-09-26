@@ -17,6 +17,11 @@ static unsigned query_head,query_count,ec_command,ec_address,ec_phase,ec_status,
 static unsigned stuck,allocations,capabilities,lid,up,down,writes,ready_messages,retired_messages;
 static unsigned char hardware_lock;
 static unsigned deny_allocations;
+static unsigned event_waits,queue_callbacks,inject_wait_work,inject_wait_failure;
+static unsigned semaphore_creates,fail_semaphore_at;
+static void counted_work(void *context) {
+    (void)context;__atomic_add_fetch(&queue_callbacks,1,__ATOMIC_RELEASE);
+}
 static unsigned guard(void) {while(__atomic_test_and_set(&hardware_lock,__ATOMIC_ACQUIRE)){}return 0;}
 static void unguard(void) {__atomic_clear(&hardware_lock,__ATOMIC_RELEASE);}
 void *r4_alloc(size_t n) {if(__atomic_load_n(&deny_allocations,__ATOMIC_ACQUIRE))return 0;void *p=malloc(n);if(p)__atomic_add_fetch(&allocations,1,__ATOMIC_RELAXED);return p;}
@@ -38,11 +43,19 @@ void r4_log(uint32_t level,const char *s) {
 }
 typedef struct {unsigned count,maximum;} Semaphore;
 uint64_t r4_semaphore(uint32_t initial,uint32_t maximum) {
+    if(__atomic_add_fetch(&semaphore_creates,1,__ATOMIC_RELAXED)==fail_semaphore_at)return 0;
     Semaphore *s=r4_alloc(sizeof(*s));if(!s)return 0;
     *s=(Semaphore){initial,maximum};return (uintptr_t)s;
 }
 int r4_acquire(uint64_t handle,uint16_t ms) {
     Semaphore *s=(void*)(uintptr_t)handle;
+    if(ms==UINT16_MAX&&s->maximum==1) {
+        __atomic_add_fetch(&event_waits,1,__ATOMIC_RELEASE);
+        // Publish after the worker's empty check, before its actual wait.
+        if(__atomic_exchange_n(&inject_wait_work,0,__ATOMIC_ACQ_REL))
+            uacpi_kernel_schedule_work(0,counted_work,0);
+        if(__atomic_exchange_n(&inject_wait_failure,0,__ATOMIC_ACQ_REL))return -1;
+    }
     uint64_t end=r4_now()+(uint64_t)ms*1000000;
     for(;;) {
         unsigned value=__atomic_load_n(&s->count,__ATOMIC_ACQUIRE);
@@ -128,12 +141,52 @@ static void event(unsigned value) {
     guard();query[(query_head+query_count)%64]=value;query_count++;ports[0x402]|=4;unguard();
 }
 static int start(void) {
-    r4_host_reset();r4_platform_reset();
+    if(r4_host_reset())return -1;r4_platform_reset();
     for(unsigned i=0;i<4;i++)if(r4_test_start(i))return -1;
     return 0;
 }
+static int queue_test(void) {
+    // Startup allocation failure must not leave any of the earlier events.
+    for(unsigned n=1;n<=4;n++) {
+        semaphore_creates=0;fail_semaphore_at=n;
+        if(r4_host_reset()==0||allocations)return 1;
+    }
+    fail_semaphore_at=0;
+    if(r4_host_reset())return 1;
+    queue_callbacks=event_waits=0;inject_wait_work=1;
+    if(r4_test_start(0))return 1;
+    if(!wait_value(&queue_callbacks,1,1000))goto failed;
+    // At most one stale binary permit may need consuming before idle.
+    r4_sleep(20);unsigned before=__atomic_load_n(&event_waits,__ATOMIC_ACQUIRE);
+    r4_sleep(40);
+    if(before!=__atomic_load_n(&event_waits,__ATOMIC_ACQUIRE))goto failed;
+    for(unsigned i=0;i<200;i++)if(uacpi_kernel_schedule_work(0,counted_work,0))goto failed;
+    r4_host_stop();r4_test_join();
+    if(queue_callbacks!=201||allocations)return 1;
+
+    // Stop before start still drains both admitted queues, including a full
+    // queue whose many notifications coalesced into just one permit.
+    if(r4_host_reset())return 1;
+    queue_callbacks=0;
+    for(unsigned i=0;i<256;i++)if(uacpi_kernel_schedule_work(0,counted_work,0))goto failed;
+    for(unsigned i=0;i<256;i++)if(uacpi_kernel_schedule_work(1,counted_work,0))goto failed;
+    r4_host_stop();
+    if(uacpi_kernel_schedule_work(0,counted_work,0)==UACPI_STATUS_OK)goto failed;
+    if(r4_test_start(0)||r4_test_start(1))goto failed;
+    r4_test_join();if(queue_callbacks!=512||allocations)return 1;
+
+    if(r4_host_reset())return 1;
+    inject_wait_failure=1;
+    if(r4_test_start(0))goto failed;
+    r4_test_join();if(!r4_host_fault()||allocations)return 1;
+    printf("[ACPIPLAT] queue idle/no polling, enqueue at wait, burst, stop/drain, wait failure and event OOM PASS\n");
+    return 0;
+failed:
+    r4_host_stop();r4_test_join();return 1;
+}
 #define CHECK(C) do {if(!(C)){fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#C);result=1;goto cleanup;}}while(0)
 int r4_test(void) {
+    if(queue_test())return 1;
     int result=0;tables(0);CHECK(start()==0);
     CHECK(wait_value(&ready_messages,1,5000));CHECK(wait_value(&capabilities,3,500));CHECK(wait_value(&lid,1,500));
     uacpi_u64 mode=0;CHECK(!uacpi_eval_simple_integer(0,"\\_SB.VGA0.MODE",&mode)&&mode==4);

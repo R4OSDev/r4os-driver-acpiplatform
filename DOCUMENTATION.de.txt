@@ -1,4 +1,4 @@
-﻿ACPIPLAT / AcpiPlatform0.1.0
+﻿ACPIPLAT / AcpiPlatform0.1.1
 ============================
 Rolle: externer R4D-Eingabetreiber. Kanonisches Projekt R4OSDev/r4os-driver-acpiplatform.
 Liefert standardisierte ACPI-/EC-Deckel- und Helligkeitsereignisse. Kernel-
@@ -24,4 +24,18 @@ Shutdown bindet Input-Treiber an den normalen Systemtransitionpfad.
 uACPI6.1.0 / f5f6cc29f85dd5db0dd79c47700c8f3ebce18be4 ist unveraendertes
 MIT-Material. Herkunft und Archivhash: ThirdParty/uACPI/Provenance.json.
 Originale Portbruecke, EC-Protokoll und synthetische Tests: Apache-2.0.
-Reale EC-/Fn-/Deckel-/Panelpruefungen erst in Roadmap0.80.39.
+0.81.16: keine Hardwarepruefungen; synthetische Firmwarefaelle sind kein
+Nachweis realer EC-/Fn-/Deckel-/Panelreaktion.
+
+0.81.16 / A2-0020: AML-/Notify-Worker warten bei leerer Queue auf residenten
+binaeren Semaphoren. Ein verlorenes Signal am Uebergang ist ausgeschlossen,
+weil Queueeintrag vor Signal publiziert wird und der Permit gespeichert bleibt.
+Die Queue ist die Bedingung; Bursts koaleszieren ihre Wecksignale. Stop weckt
+alle Worker und laesst bereits angenommene Arbeit vor Join ablaufen. Erst
+nach Join werden Ereignisse freigegeben; Start-OOM raeumt Teilanlage auf.
+
+SCI behaelt nur bei registriertem Handler den vorhandenen 10-ms-Status/ACK-
+Fallback: DriverPlatformApi stellt keinen SCI-IRQ-Anschluss bereit. EC-GPEs
+wecken den Plattformworker direkt; offene Queries und fehlende GPE behalten
+10 ms. Sonst bleiben hoechstens 1 s fuer Firmware-/Deckel-Sicherheitsabfrage.
+Stop ist ereignisgesteuert und wartet nicht erst dieses Intervall ab.

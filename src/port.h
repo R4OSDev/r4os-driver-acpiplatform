@@ -21,7 +21,10 @@ void r4_release(uint64_t);
 void r4_destroy(uint64_t);
 int r4_input(uint32_t, uint32_t);
 
-void r4_host_reset(void);
+int r4_host_reset(void);
+void r4_host_release(void);
+void r4_host_wake(uint32_t);
+int r4_host_wait(uint32_t, uint16_t);
 void r4_host_stop(void);
 int r4_host_fault(void);
 int r4_host_worker(uint32_t);
@@ -32,5 +35,6 @@ void r4_platform_reset(void);
 uacpi_status r4_ec_early(void);
 uacpi_status r4_ec_discover(void);
 void r4_ec_poll(void);
+uint16_t r4_ec_poll_interval_ms(void);
 void r4_ec_stop(void);
 void r4_ec_release(void);
