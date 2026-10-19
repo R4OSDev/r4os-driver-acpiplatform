@@ -10,6 +10,9 @@ var threads: r.r4dev.DriverThreadContext = undefined;
 var semaphores: r.r4dev.DriverSemaphoreContext = undefined;
 var handles: [4]u64 = @splat(0);
 var started: bool = false;
+var power: ?r.r4dev.DriverCpuPowerContext = null;
+var power_cookie: u64 = 0;
+extern fn r4_power_call(*const a.CpuPerformanceRequest, *a.CpuFirmwareInfo) c_int;
 extern fn r4_host_reset() c_int;
 extern fn r4_host_release() void;
 extern fn r4_host_stop() void;
@@ -18,7 +21,9 @@ extern fn r4_platform_run() c_int;
 extern fn r4_platform_shutdown_status() c_int;
 extern fn r4_platform_reset() void;
 extern fn r4_platform_stop() void;
-comptime { asm (r.r4dev.driverEntriesAsm("acpiplat_init", "acpiplat_shutdown")); }
+comptime {
+    asm (r.r4dev.driverEntriesAsm("acpiplat_init", "acpiplat_shutdown"));
+}
 
 export fn acpiplat_init(api: *const r.r4dev.DriverApi) callconv(.c) i32 {
     if (started) return -1;
@@ -31,12 +36,24 @@ export fn acpiplat_init(api: *const r.r4dev.DriverApi) callconv(.c) i32 {
     if (platform.rsdp() == 0 or resources.nowNs() == 0 or resources.nowNs() == std.math.maxInt(u64) or driver.timerFrequency() == 0) return -1;
     if (r4_host_reset() != 0) return -1;
     r4_platform_reset();
+    power = resources.cpuPower();
+    if (power) |*mechanism| {
+        if (mechanism.has("firmware_register") and mechanism.has("firmware_unregister") and mechanism.has("firmware_control") and mechanism.has("firmware_cpu_info")) {
+            const backend: a.CpuFirmwareBackend = .{ .execute = @intFromPtr(&firmware), .flags = a.cpu_power_backend_flag_parallel };
+            if (mechanism.firmwareRegister(0, &backend, &power_cookie) != 0) {
+                r4_host_release();
+                return -1;
+            }
+        }
+    }
     started = true;
     for (0..handles.len) |i| {
         // No parallel flag: firmware AML and the polling SCI stay on CPU0.
         if (threads.start(run, i, 0, &handles[i]) != 0) {
-            r4_platform_stop(); r4_host_stop();
-            _ = acpiplat_shutdown(); return -1;
+            r4_platform_stop();
+            r4_host_stop();
+            _ = acpiplat_shutdown();
+            return -1;
         }
     }
     driver.logInfo("ACPIPLAT external ACPI/EC startup; SCI polling; no system suspend");
@@ -50,6 +67,11 @@ fn run(kind: usize) callconv(.c) i32 {
 }
 export fn acpiplat_shutdown() callconv(.c) i32 {
     if (!started) return 0;
+    if (power_cookie != 0) {
+        const mechanism = if (power) |*v| v else return -1;
+        if (mechanism.firmwareUnregister(0, power_cookie) != 0) return -1;
+        power_cookie = 0;
+    }
     r4_platform_stop();
     // Never cancel or free a task inside AML. A timed-out stop retains the
     // module and all callback storage; a later shutdown can join it again.
@@ -63,7 +85,30 @@ export fn acpiplat_shutdown() callconv(.c) i32 {
     r4_host_release();
     _ = platform.input(a.platform_input_kind_capabilities, 0);
     if (r4_platform_shutdown_status() != 0) return -1;
-    started = false; return 0;
+    started = false;
+    return 0;
+}
+fn firmware(_: usize, request: *const a.CpuPerformanceRequest, out: *a.CpuFirmwareInfo) callconv(.c) i32 {
+    return r4_power_call(request, out);
+}
+export fn r4_power_cpu(cpu: u32, apic: *u32, epoch: *u64) callconv(.c) c_int {
+    const mechanism = if (power) |*v| v else return a.cpu_capabilities_error_unsupported;
+    var cap: a.CpuCapabilitiesInfo = .{};
+    const rc = mechanism.firmwareCpuInfo(cpu, &cap);
+    if (rc != 0) return rc;
+    if (cap.flags & a.cpu_capabilities_flag_schedulable == 0 or cap.epoch == 0) return a.cpu_capabilities_error_offline;
+    apic.* = cap.apic_id;
+    epoch.* = cap.epoch;
+    return 0;
+}
+export fn r4_power_control(op: u32, cpu: u32, epoch: u64, mask: u64, token: u64, out: *u64) callconv(.c) c_int {
+    const mechanism = if (power) |*v| v else return a.cpu_capabilities_error_unsupported;
+    return mechanism.firmwareControl(op, cpu, epoch, mask, token, out);
+}
+export fn r4_power_pause(ms: u64) callconv(.c) void {
+    // Transport callers are ordinary admitted tasks, not dedicated R4D
+    // threads. Their exact kernel task admission already spans this wait.
+    driver.waitTicks(ticks(@min(ms, 1000)));
 }
 fn ticks(ms: u64) u64 {
     const hz = @max(driver.timerFrequency(), 1);
@@ -83,32 +128,55 @@ export fn r4_free(address: ?*anyopaque) callconv(.c) void {
     const header: *const u64 = @ptrFromInt(@intFromPtr(value) - 16);
     _ = heap.release(header.*);
 }
-export fn r4_rsdp() callconv(.c) u64 { return platform.rsdp(); }
+export fn r4_rsdp() callconv(.c) u64 {
+    return platform.rsdp();
+}
 export fn r4_view(physical: u64, bytes: u64) callconv(.c) ?*anyopaque {
     return @ptrCast(platform.physicalView(physical, bytes) orelse return null);
 }
-export fn r4_now() callconv(.c) u64 { return resources.nowNs(); }
+export fn r4_now() callconv(.c) u64 {
+    return resources.nowNs();
+}
 export fn r4_sleep(ms: u64) callconv(.c) void {
-    if (ms == 0) { _ = threads.sleepTicks(1); return; }
+    if (ms == 0) {
+        _ = threads.sleepTicks(1);
+        return;
+    }
     // Bound every scheduler wait even for an arbitrarily long AML Sleep.
     var remaining = ms;
     while (remaining != 0) {
         const part = @min(remaining, 1000);
-        _ = threads.sleepTicks(ticks(part)); remaining -= part;
+        _ = threads.sleepTicks(ticks(part));
+        remaining -= part;
     }
 }
-export fn r4_thread() callconv(.c) u64 { return threads.current(); }
+export fn r4_thread() callconv(.c) u64 {
+    return threads.current();
+}
 export fn r4_log(level: u32, message: [*:0]const u8) callconv(.c) void {
     if (level <= 1) driver.logError(message) else if (level == 2) driver.logWarn(message) else driver.logInfo(message);
 }
 export fn r4_in(port: u16, width: u32) callconv(.c) u32 {
-    return switch (width) { 1 => driver.portInb(port), 2 => driver.portInw(port), 4 => driver.portInl(port), else => unreachable };
+    return switch (width) {
+        1 => driver.portInb(port),
+        2 => driver.portInw(port),
+        4 => driver.portInl(port),
+        else => unreachable,
+    };
 }
 export fn r4_out(port: u16, width: u32, value: u32) callconv(.c) void {
-    switch (width) { 1 => driver.portOutb(port, @truncate(value)), 2 => driver.portOutw(port, @truncate(value)), 4 => driver.portOutl(port, value), else => unreachable }
+    switch (width) {
+        1 => driver.portOutb(port, @truncate(value)),
+        2 => driver.portOutw(port, @truncate(value)),
+        4 => driver.portOutl(port, value),
+        else => unreachable,
+    }
 }
 export fn r4_irq_disable() callconv(.c) u64 {
-    return asm volatile ("pushfq; popq %[flags]; cli" : [flags] "=r" (-> u64) :: .{ .memory = true });
+    return asm volatile ("pushfq; popq %[flags]; cli"
+        : [flags] "=r" (-> u64),
+        :
+        : .{ .memory = true });
 }
 export fn r4_irq_restore(flags: u64) callconv(.c) void {
     if (flags & 0x200 != 0) asm volatile ("sti" ::: .{ .memory = true });
@@ -122,6 +190,12 @@ export fn r4_acquire(handle: u64, ms: u16) callconv(.c) c_int {
     const result = semaphores.acquire(handle, if (ms == 0) 0 else if (ms == 0xffff) std.math.maxInt(u64) else ticks(ms));
     return if (result == 0) 0 else if (result == a.driver_semaphore_error_timeout) 1 else -1;
 }
-export fn r4_release(handle: u64) callconv(.c) void { _ = semaphores.release(handle); }
-export fn r4_destroy(handle: u64) callconv(.c) void { _ = semaphores.destroy(handle); }
-export fn r4_input(kind: u32, value: u32) callconv(.c) c_int { return platform.input(kind, value); }
+export fn r4_release(handle: u64) callconv(.c) void {
+    _ = semaphores.release(handle);
+}
+export fn r4_destroy(handle: u64) callconv(.c) void {
+    _ = semaphores.destroy(handle);
+}
+export fn r4_input(kind: u32, value: u32) callconv(.c) c_int {
+    return platform.input(kind, value);
+}

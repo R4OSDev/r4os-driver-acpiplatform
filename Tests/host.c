@@ -1,6 +1,9 @@
 // Copyright 2026 R4. SPDX-License-Identifier: Apache-2.0
 #include "port.h"
 #include "fixture.h"
+#include "power.h"
+#include "power_pss_fixture.h"
+#include "power_cppc_fixture.h"
 #include <uacpi/acpi.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -11,7 +14,7 @@ extern void r4_test_join(void);
 static struct acpi_rsdp root;
 static struct acpi_fadt fadt;
 static struct acpi_facs facs;
-static unsigned char xsdt[36+24],ecdt[96],mcfg[60],pci[4096];
+static unsigned char xsdt[36+32],ecdt[96],mcfg[60],pci[4096],madt[60];
 static unsigned char ports[65536],ec_ram[256],query[64];
 static unsigned query_head,query_count,ec_command,ec_address,ec_phase,ec_status,ec_output;
 static unsigned stuck,allocations,capabilities,lid,up,down,writes,ready_messages,retired_messages;
@@ -19,6 +22,21 @@ static unsigned char hardware_lock;
 static unsigned deny_allocations;
 static unsigned event_waits,queue_callbacks,inject_wait_work,inject_wait_failure;
 static unsigned semaphore_creates,fail_semaphore_at;
+static unsigned power_kind,power_mode,power_writes,inject_power_stop,power_wrong_task,inject_acquire_change;
+static uint64_t power_token,power_next_token=1,power_worker;
+void r4_power_pause(uint64_t ms) {r4_sleep(ms);}
+int r4_power_cpu(uint32_t cpu,uint32_t *apic,uint64_t *epoch) {
+    if(!power_kind||cpu>1)return -7;
+    *apic=cpu?4:2;*epoch=101+cpu;power_worker=r4_thread();return 0;
+}
+int r4_power_control(uint32_t operation,uint32_t cpu,uint64_t epoch,uint64_t mask,uint64_t expected,uint64_t *token) {
+    if(r4_thread()!=power_worker||cpu||epoch!=101||mask!=3)return -5;
+    if(operation==1){if(expected||power_token)return -2;*token=power_token=power_next_token++;
+        if(inject_acquire_change){inject_acquire_change=0;ports[0x700]=power_kind==1?2:21;}
+        return 0;}
+    if(operation!=2||!power_token||expected!=power_token)return -4;
+    *token=power_token=0;return 0;
+}
 static void counted_work(void *context) {
     (void)context;__atomic_add_fetch(&queue_callbacks,1,__ATOMIC_RELEASE);
 }
@@ -32,8 +50,10 @@ static int within(uint64_t p,uint64_t n,const void *base,size_t bytes) {
 }
 void *r4_view(uint64_t p,uint64_t n) {
     if(within(p,n,&root,sizeof(root))||within(p,n,&fadt,sizeof(fadt))||within(p,n,&facs,sizeof(facs))||
-       within(p,n,xsdt,sizeof(xsdt))||within(p,n,ecdt,sizeof(ecdt))||within(p,n,mcfg,sizeof(mcfg))||within(p,n,aml_fixture,sizeof(aml_fixture)))return (void*)(uintptr_t)p;
+       within(p,n,xsdt,sizeof(xsdt))||within(p,n,ecdt,sizeof(ecdt))||within(p,n,mcfg,sizeof(mcfg))||within(p,n,madt,sizeof(madt))||
+       within(p,n,power_pss_fixture,sizeof(power_pss_fixture))||within(p,n,power_cppc_fixture,sizeof(power_cppc_fixture))||within(p,n,aml_fixture,sizeof(aml_fixture)))return (void*)(uintptr_t)p;
     if(p>=0x80000000&&n<=sizeof(pci)&&p-0x80000000<=sizeof(pci)-n)return pci+(p-0x80000000);
+    if(p>=0x90000000&&n<=sizeof(ports)&&p-0x90000000<=sizeof(ports)-n)return ports+(p-0x90000000);
     return 0;
 }
 void r4_log(uint32_t level,const char *s) {
@@ -87,6 +107,10 @@ uint32_t r4_in(uint16_t port,uint32_t width) {
     unguard();return value;
 }
 void r4_out(uint16_t port,uint32_t width,uint32_t value) {
+    if(port>=0x700&&port<0x720) {
+        power_writes++;if(r4_thread()!=power_worker)power_wrong_task++;
+        if(inject_power_stop){inject_power_stop=0;r4_platform_stop();}
+    }
     guard();
     if((port==0x66||port==0x62)&&width==1) {
         writes++;
@@ -106,6 +130,7 @@ void r4_out(uint16_t port,uint32_t width,uint32_t value) {
         if((p>=0x400&&p<0x404)||(p>=0x500&&p<0x502))ports[p]&=~byte;
         else ports[p]=byte;
     }
+    if(power_kind==1&&power_mode==6&&(port==0x700||port==0x710)&&ports[0x700]==ports[0x710])ports[0x720]=ports[0x730]=ports[0x700];
     unguard();
 }
 static void checksum(void *data,size_t n,unsigned index) {
@@ -121,6 +146,11 @@ static void tables(int bad_ecdt) {
     memset(ec_ram,0,sizeof(ec_ram));ec_ram[0]=1;ports[0x504]=1;
     query_count=query_head=ec_command=ec_phase=ec_status=stuck=0;ready_messages=retired_messages=capabilities=lid=up=down=writes=0;
     header(&fadt,"FACP",sizeof(fadt));fadt.x_dsdt=(uintptr_t)aml_fixture;fadt.x_firmware_ctrl=(uintptr_t)&facs;fadt.sci_int=9;
+    if(power_kind)fadt.x_dsdt=(uintptr_t)(power_kind==1?power_pss_fixture:power_cppc_fixture);
+    power_writes=power_wrong_task=inject_power_stop=0;ports[0x6f0]=power_mode;
+    ports[0x700]=ports[0x710]=power_kind==1?3:20;
+    ports[0x701]=ports[0x711]=200;ports[0x702]=ports[0x712]=0;ports[0x703]=ports[0x713]=128;
+    ports[0x720]=ports[0x730]=3;
     fadt.pm1a_evt_blk=0x500;fadt.pm1_evt_len=4;fadt.pm1a_cnt_blk=0x504;fadt.pm1_cnt_len=2;
     fadt.pm_tmr_blk=0x508;fadt.pm_tmr_len=4;fadt.gpe0_blk=0x400;fadt.gpe0_blk_len=8;fadt.flags=ACPI_TMR_VAL_EXT;
     memcpy(facs.signature,"FACS",4);facs.length=sizeof(facs);facs.version=2;
@@ -129,7 +159,9 @@ static void tables(int bad_ecdt) {
     header(e,"ECDT",sizeof(*e)+sizeof(path));e->ec_control=(struct acpi_gas){1,8,0,1,bad_ecdt?0x62:0x66};e->ec_data=(struct acpi_gas){1,8,0,1,0x62};e->gpe_bit=0x12;
     memcpy(e->ec_id,path,sizeof(path));checksum(e,e->hdr.length,9);
     struct acpi_mcfg *m=(void*)mcfg;header(m,"MCFG",sizeof(mcfg));m->entries[0]=(struct acpi_mcfg_allocation){0x80000000,0,0,0,0};checksum(m,sizeof(mcfg),9);
-    header(xsdt,"XSDT",sizeof(xsdt));uint64_t entries[]={(uintptr_t)&fadt,(uintptr_t)ecdt,(uintptr_t)mcfg};memcpy(xsdt+36,entries,sizeof(entries));checksum(xsdt,sizeof(xsdt),9);
+    header(madt,"APIC",sizeof(madt));
+    struct acpi_madt_lapic processors[2]={{{0,8},10,2,1},{{0,8},20,4,1}};memcpy(madt+44,processors,sizeof(processors));checksum(madt,sizeof(madt),9);
+    header(xsdt,"XSDT",sizeof(xsdt));uint64_t entries[]={(uintptr_t)&fadt,(uintptr_t)ecdt,(uintptr_t)mcfg,(uintptr_t)madt};memcpy(xsdt+36,entries,sizeof(entries));checksum(xsdt,sizeof(xsdt),9);
     memcpy(root.signature,"RSD PTR ",8);memcpy(root.oemid,"R4TEST",6);root.revision=2;root.length=sizeof(root);root.xsdt_addr=(uintptr_t)xsdt;
     checksum(&root,20,8);checksum(&root,sizeof(root),32);
 }
@@ -185,8 +217,72 @@ failed:
     r4_host_stop();r4_test_join();return 1;
 }
 #define CHECK(C) do {if(!(C)){fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#C);result=1;goto cleanup;}}while(0)
+#define POWER_CHECK(C) do {if(!(C)){fprintf(stderr,"FAIL power kind=%u mode=%u line=%d: %s\n",power_kind,power_mode,__LINE__,#C);return 1;}}while(0)
+static int power_tests(void) {
+    unsigned cases=0;
+    for(power_kind=1;power_kind<=2;power_kind++)for(power_mode=0;power_mode<=6;power_mode++) {
+        tables(0);POWER_CHECK(start()==0);POWER_CHECK(wait_value(&ready_messages,1,5000));
+        R4PowerRequest request={.version=1,.size=64,.cpu_index=0,.epoch=101};R4PowerInfo info={.version=1,.size=192};
+        POWER_CHECK(r4_power_call(&request,&info)==0);POWER_CHECK(!power_writes&&!power_token&&!power_wrong_task);
+        if(power_mode&&power_mode!=5&&!(power_kind==1&&power_mode==6)) {
+            POWER_CHECK(info.state==0&&info.lease==0);
+            request.operation=1;request.minimum=1;request.maximum=3;request.desired=1;
+            POWER_CHECK(r4_power_call(&request,&info)==0);POWER_CHECK(info.lease==0&&!power_writes&&!power_token);cases++;
+            r4_platform_stop();r4_test_join();POWER_CHECK(!allocations&&!r4_platform_shutdown_status());continue;
+        }
+        POWER_CHECK(info.state==2&&info.backend==(power_kind==1?2:1)&&info.domain_mask==3&&info.coordination==0xfc&&info.descriptor_identity);cases++;
+        POWER_CHECK(info.transport_spaces==(power_mode==5?1:2));
+        request.cpu_index=1;request.epoch=102;POWER_CHECK(!r4_power_call(&request,&info)&&info.state==0&&info.domain_mask==3&&!info.lease);cases++;
+        request.cpu_index=0;request.epoch=999;POWER_CHECK(!r4_power_call(&request,&info)&&info.last_error==-4&&!power_writes);cases++;
+        request.epoch=101;request.operation=1;request.minimum=0;request.maximum=3;request.desired=1;
+        POWER_CHECK(!r4_power_call(&request,&info)&&info.last_error==-1&&!power_writes&&!power_token);cases++;
+        request.minimum=power_kind==1?1:20;request.maximum=power_kind==1?1:150;request.desired=power_kind==1?1:0;
+        request.epp=power_kind==1?0:255;request.flags=power_kind==1?0:1;inject_acquire_change=power_mode!=6;
+        POWER_CHECK(!r4_power_call(&request,&info)&&info.state==3&&info.lease&&info.revision==1&&!info.last_error&&info.observed_request==info.last_written);
+        POWER_CHECK(ports[0x700]==(power_kind==1?1:20)&&ports[0x710]==(power_kind==1?1:20)&&!power_wrong_task);cases++;
+        uint64_t token=info.lease,revision=info.revision;unsigned writes_before=power_writes;
+        request.lease=token+1;request.expected_revision=revision;
+        POWER_CHECK(!r4_power_call(&request,&info)&&info.last_error==-4&&info.lease==token&&power_writes==writes_before);cases++;
+        request=(R4PowerRequest){.version=1,.size=64,.cpu_index=0,.epoch=101};
+        ports[0x700]=power_kind==1?4:22;
+        POWER_CHECK(!r4_power_call(&request,&info)&&info.state==6&&info.lease==token&&power_writes==writes_before);cases++;
+        request.operation=2;request.lease=token;request.expected_revision=revision;
+        POWER_CHECK(!r4_power_call(&request,&info)&&info.state==6&&info.lease==token&&power_token&&power_writes==writes_before);cases++;
+        ports[0x700]=power_kind==1?1:20;
+        POWER_CHECK(!r4_power_call(&request,&info)&&info.state==4&&!info.lease&&!power_token&&(info.flags&4));
+        // Exact post-admission baseline, including distinct members and zero
+        // desired performance, is restored rather than the preceding sample.
+        POWER_CHECK(ports[0x700]==(power_kind==1?(power_mode==6?3:2):21)&&ports[0x710]==(power_kind==1?3:20)&&ports[0x702]==0&&ports[0x703]==128);cases++;
+        request=(R4PowerRequest){.version=1,.size=64,.cpu_index=0,.epoch=101,.operation=1,
+            .minimum=power_kind==1?1:20,.maximum=power_kind==1?1:150,.desired=power_kind==1?1:0,.epp=power_kind==1?0:255,.flags=power_kind==1?0:1};
+        inject_power_stop=1;
+        POWER_CHECK(!r4_power_call(&request,&info)&&info.state==3&&info.lease&&power_token&&!retired_messages);cases++;
+        if(power_mode==5)r4_platform_stop();
+        request=(R4PowerRequest){.version=1,.size=64,.cpu_index=0,.epoch=101,.operation=2,.lease=info.lease,.expected_revision=info.revision};
+        POWER_CHECK(!r4_power_call(&request,&info)&&info.state==4&&!info.lease&&!power_token);
+        r4_test_join();POWER_CHECK(!allocations&&retired_messages==1&&!power_wrong_task);cases++;
+        if(power_mode==0) {
+            tables(0);POWER_CHECK(!start()&&wait_value(&ready_messages,1,5000));
+            request=(R4PowerRequest){.version=1,.size=64,.cpu_index=0,.epoch=101,.operation=1,
+                .minimum=power_kind==1?1:20,.maximum=power_kind==1?1:150,.desired=power_kind==1?1:0};
+            POWER_CHECK(!r4_power_call(&request,&info)&&info.lease&&info.state==3);token=info.lease;revision=info.revision;
+            if(power_kind==2)POWER_CHECK(info.epp==128&&ports[0x703]==128&&(info.valid_mask&8));
+            uacpi_namespace_node *node=0;POWER_CHECK(!uacpi_namespace_node_find(uacpi_namespace_root(),"\\_SB.CPU0",&node));
+            r4_power_notify(node,0x85);
+            request=(R4PowerRequest){.version=1,.size=64,.cpu_index=0,.epoch=101};
+            POWER_CHECK(!r4_power_call(&request,&info)&&info.state==5&&info.lease==token&&info.last_error==-7);cases++;
+            request.operation=2;request.lease=token;request.expected_revision=revision;
+            POWER_CHECK(!r4_power_call(&request,&info)&&info.state==4&&!info.lease&&!power_token);cases++;
+            r4_platform_stop();r4_test_join();POWER_CHECK(!allocations&&!r4_platform_shutdown_status());
+        }
+    }
+    power_kind=power_mode=0;
+    printf("[ACPIPLAT] firmware %u source cases: actual AML PSS/CPPC, MADT identity, SW_ALL, malformed/missing/FFH, post-admission baseline, conflict, exact return and stop in request PASS\n",cases);
+    return 0;
+}
 int r4_test(void) {
     if(queue_test())return 1;
+    if(power_tests())return 1;
     int result=0;tables(0);CHECK(start()==0);
     CHECK(wait_value(&ready_messages,1,5000));CHECK(wait_value(&capabilities,3,500));CHECK(wait_value(&lid,1,500));
     uacpi_u64 mode=0;CHECK(!uacpi_eval_simple_integer(0,"\\_SB.VGA0.MODE",&mode)&&mode==4);

@@ -1,4 +1,16 @@
 const std = @import("std");
+const a = @import("r4os").abi;
+const wire = @cImport({
+    @cInclude("power.h");
+});
+comptime {
+    for (.{ .{ a.CpuPerformanceRequest, wire.R4PowerRequest }, .{ a.CpuFirmwareInfo, wire.R4PowerInfo } }) |pair| {
+        if (@sizeOf(pair[0]) != @sizeOf(pair[1]) or @alignOf(pair[0]) != @alignOf(pair[1])) @compileError("private C firmware wire layout differs from canonical ABI");
+        for (@typeInfo(pair[0]).@"struct".fields) |field| {
+            if (@offsetOf(pair[0], field.name) != @offsetOf(pair[1], field.name) or @sizeOf(field.type) != @sizeOf(@FieldType(pair[1], field.name))) @compileError("private C firmware field differs from canonical ABI");
+        }
+    }
+}
 extern fn r4_test() c_int;
 extern fn r4_host_worker(u32) c_int;
 extern fn r4_platform_run() c_int;
@@ -6,14 +18,22 @@ extern fn r4_host_stop() void;
 extern fn r4_host_release() void;
 var workers: [4]?std.Thread = @splat(null);
 fn worker(kind: u32) void {
-    if (kind < 3) { _ = r4_host_worker(kind); } else { _ = r4_platform_run(); r4_host_stop(); }
+    if (kind < 3) {
+        _ = r4_host_worker(kind);
+    } else {
+        _ = r4_platform_run();
+        r4_host_stop();
+    }
 }
 export fn r4_test_start(kind: u32) callconv(.c) c_int {
     workers[kind] = std.Thread.spawn(.{}, worker, .{kind}) catch return -1;
     return 0;
 }
 export fn r4_test_join() callconv(.c) void {
-    for (&workers) |*thread| if (thread.*) |value| { value.join(); thread.* = null; };
+    for (&workers) |*thread| if (thread.*) |value| {
+        value.join();
+        thread.* = null;
+    };
     r4_host_release();
 }
 export fn r4_now() callconv(.c) u64 {
@@ -22,7 +42,13 @@ export fn r4_now() callconv(.c) u64 {
 export fn r4_sleep(ms: u64) callconv(.c) void {
     std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(@intCast(ms)), .awake) catch {};
 }
-export fn r4_thread() callconv(.c) u64 { return @as(u64, std.Thread.getCurrentId()) + 1; }
-export fn r4_irq_disable() callconv(.c) u64 { return 0; }
+export fn r4_thread() callconv(.c) u64 {
+    return @as(u64, std.Thread.getCurrentId()) + 1;
+}
+export fn r4_irq_disable() callconv(.c) u64 {
+    return 0;
+}
 export fn r4_irq_restore(_: u64) callconv(.c) void {}
-pub fn main() !void { if (r4_test() != 0) return error.AcpiPlatformIntegration; }
+pub fn main() !void {
+    if (r4_test() != 0) return error.AcpiPlatformIntegration;
+}

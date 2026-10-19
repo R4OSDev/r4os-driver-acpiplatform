@@ -1,6 +1,6 @@
-﻿ACPIPLAT / AcpiPlatform0.1.1
+﻿ACPIPLAT / AcpiPlatform0.1.3
 ============================
-Rolle: externer R4D-Eingabetreiber. Kanonisches Projekt R4OSDev/r4os-driver-acpiplatform.
+Rolle: externer R4D-Plattformtreiber. Kanonisches Projekt R4OSDev/r4os-driver-acpiplatform.
 Liefert standardisierte ACPI-/EC-Deckel- und Helligkeitsereignisse. Kernel-
 vertrag, Quiesce, Quellen und Grenzen: Docs/Drivers/AMDLaptop08035.txt im Docs-
 Repository. Kein Systemsuspend, keine Batterie-/Thermal-/Vendor-Fn-Policy.
@@ -39,3 +39,19 @@ Fallback: DriverPlatformApi stellt keinen SCI-IRQ-Anschluss bereit. EC-GPEs
 wecken den Plattformworker direkt; offene Queries und fehlende GPE behalten
 10 ms. Sonst bleiben hoechstens 1 s fuer Firmware-/Deckel-Sicherheitsabfrage.
 Stop ist ereignisgesteuert und wartet nicht erst dieses Intervall ab.
+
+0.85.30: getrennt verhandelter CPUPOWER-Firmwaretransport fuer validierte
+_CPC- beziehungsweise _PSS/_PCT-Vertraege und vollstaendige _PSD-Domaenen.
+MADT-UID/APIC-Zuordnung zur echten CPU-Liste; keine dichten IDs geraten.
+Anfragen und Register-/AML-Arbeit bleiben beim vorhandenen Plattformworker.
+Originale Registerwoerter erst nach exklusiver Domaenenzulassung erfassen und
+vollstaendig vergleichen. Stop/Notify ziehen neue Steuerung zurueck, behalten
+aber genaue Bindungen, Ressourcen und sensorunabhaengige Rueckgabe.
+SystemIO und bestehend gemapptes SystemMemory sind die ersten Transporte;
+PCC, FFH und neue _OSC-Freigaben bleiben ohne erfundene Unterstuetzung.
+CPPC aktiviert keine deaktivierte autonome Schnittstelle. P-States verwenden
+deklarierte Raenge statt MHz. Richtlinien gehoeren dem PowerService.
+Der Testplan nimmt ACPIPLAT ausdruecklich auf; die normale Scope bleibt none.
+Bedienung, genaue Grenzen und Fixture-Regenerierung stehen in README.md.
+68 Firmware-Quellfaelle bestehen; reale physische Takt-/Energiewirkung ist damit
+nicht nachgewiesen. Aktueller Gesamtbeleg: Docs/Core/CpuAcpiPerformance08530.json.
