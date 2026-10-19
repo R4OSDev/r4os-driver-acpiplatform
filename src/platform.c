@@ -3,6 +3,7 @@
 #include "power.h"
 #include <uacpi/event.h>
 #include <uacpi/notify.h>
+#include "idle.h"
 #include <uacpi/utilities.h>
 #include <uacpi/context.h>
 
@@ -13,10 +14,11 @@ static unsigned video_count,adapter_count;
 static uacpi_status discovery_failure;
 void r4_platform_reset(void) {
     r4_power_reset();
+    r4_idle_reset();
     shutdown_status=0;stop_requested=0;ready=0;capabilities=0;lid=0;video_count=0;adapter_count=0;discovery_failure=0;
 }
 int r4_platform_shutdown_status(void) {return __atomic_load_n(&shutdown_status,__ATOMIC_ACQUIRE);}
-void r4_platform_stop(void) {r4_power_stop();__atomic_store_n(&stop_requested,1,__ATOMIC_RELEASE);r4_host_wake(3);}
+void r4_platform_stop(void) {r4_idle_stop();r4_power_stop();__atomic_store_n(&stop_requested,1,__ATOMIC_RELEASE);r4_host_wake(3);}
 static void sample_lid(void) {
     if(!lid)return;
     uacpi_u64 value=0;uacpi_status rc=uacpi_eval_simple_integer(lid,"_LID",&value);
@@ -25,6 +27,7 @@ static void sample_lid(void) {
 static uacpi_status notify(void *context,uacpi_namespace_node *node,uacpi_u64 value) {
     (void)context;
     r4_power_notify(node,value);
+    r4_idle_notify(node,value);
     if(!__atomic_load_n(&ready,__ATOMIC_ACQUIRE)||__atomic_load_n(&stop_requested,__ATOMIC_ACQUIRE))return UACPI_STATUS_OK;
     if(node==lid&&value==0x80){sample_lid();return UACPI_STATUS_OK;}
     // ACPI Appendix B notifications are accepted only from discovered video
@@ -99,6 +102,7 @@ int r4_platform_run(void) {
     uint64_t next_lid=r4_now()+1000000000;
     while((!__atomic_load_n(&stop_requested,__ATOMIC_ACQUIRE)&&!r4_host_fault())||!r4_power_idle()) {
         r4_power_poll();
+        r4_idle_poll();
         if(__atomic_load_n(&stop_requested,__ATOMIC_ACQUIRE)||r4_host_fault()) {
             r4_power_stop();
             if(r4_power_idle())break;
@@ -116,6 +120,8 @@ int r4_platform_run(void) {
     }
     if(r4_host_fault())result=-1;
 done:
+    r4_idle_stop();
+    while(!r4_idle_finish())r4_sleep(1);
     r4_power_stop();
     while(!r4_power_finish()){r4_power_poll();r4_sleep(1);}
     __atomic_store_n(&ready,0,__ATOMIC_RELEASE);

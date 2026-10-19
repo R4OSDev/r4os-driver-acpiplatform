@@ -23,6 +23,7 @@ const sources = [_][]const u8{
     "src/platform.c",
     "src/ec.c",
     "src/power.c",
+    "src/idle.c",
 };
 fn addC(b: *std.Build, target: std.Build.ResolvedTarget, host: bool) *std.Build.Module {
     const m = b.createModule(.{ .target = target, .optimize = .ReleaseSafe, .pic = host, .code_model = if (host) .default else .large, .red_zone = false, .sanitize_c = .off, .stack_check = false, .stack_protector = false, .link_libc = host });

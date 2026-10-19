@@ -3,6 +3,7 @@
 // worker owns every descriptor, register operation and restoration receipt.
 #include "port.h"
 #include "power.h"
+#include "idle.h"
 #include <uacpi/acpi.h>
 #include <uacpi/tables.h>
 #include <uacpi/utilities.h>
@@ -187,8 +188,10 @@ static uacpi_iteration_decision discover(void *context,uacpi_namespace_node *nod
     if(uacpi_eval_sta(node,&sta)||!(sta&1)||map_uid(uid,&apic))return UACPI_ITERATION_DECISION_CONTINUE;
     for(unsigned c=0;c<MAX_CPU;c++){uint32_t id;uint64_t epoch;if(!r4_power_cpu(c,&id,&epoch)&&id==apic){if(cpu!=MAX_CPU)return UACPI_ITERATION_DECISION_CONTINUE;cpu=c;}}
     if(cpu==MAX_CPU)return UACPI_ITERATION_DECISION_CONTINUE;
-    if(cpus[cpu].node){cpus[cpu].invalid=1;return UACPI_ITERATION_DECISION_CONTINUE;}
+    if(cpus[cpu].node){cpus[cpu].invalid=1;r4_idle_discover_cpu(node,cpu,uid,apic,0);return UACPI_ITERATION_DECISION_CONTINUE;}
     Cpu *entry=&cpus[cpu];entry->node=node;entry->uid=uid;entry->apic=apic;
+    uint64_t idle_epoch=0;uint32_t idle_apic=0;
+    if(!r4_power_cpu(cpu,&idle_apic,&idle_epoch)&&idle_apic==apic)r4_idle_discover_cpu(node,cpu,uid,apic,idle_epoch);
     uacpi_object *obj=0;uacpi_namespace_node *method=0;
     uacpi_status status=uacpi_namespace_node_find(node,"_CPC",&method);int rc=0;
     if(!status){entry->kind=1;status=uacpi_eval(method,0,0,&obj);if(status)rc=INVALID;else{rc=cppc(entry,obj);uacpi_object_unref(obj);}}
@@ -244,6 +247,7 @@ void r4_power_discover(void) {
         if(!complete)for(unsigned c=0;c<MAX_CPU;c++)if(cpus[c].kind==1)cpus[c].invalid=1;
     }
     __atomic_store_n(&catalogue_ready,1,__ATOMIC_RELEASE);
+    r4_idle_discovery_complete(status||discovery_failed);
 }
 static int capabilities(Cpu *cpu,R4PowerInfo *info) {
     uint32_t v[4];for(unsigned n=0;n<4;n++){v[n]=cpu->values[n];if(cpu->caps_are_registers&(1U<<n)){int rc=field_read(cpu->caps[n],&v[n]);if(rc)return rc;}}

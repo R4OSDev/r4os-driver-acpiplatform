@@ -2,9 +2,10 @@ const std = @import("std");
 const a = @import("r4os").abi;
 const wire = @cImport({
     @cInclude("power.h");
+    @cInclude("idle.h");
 });
 comptime {
-    for (.{ .{ a.CpuPerformanceRequest, wire.R4PowerRequest }, .{ a.CpuFirmwareInfo, wire.R4PowerInfo } }) |pair| {
+    for (.{ .{ a.CpuPerformanceRequest, wire.R4PowerRequest }, .{ a.CpuFirmwareInfo, wire.R4PowerInfo }, .{a.CpuIdleDescriptor,wire.R4IdleDescriptor} }) |pair| {
         if (@sizeOf(pair[0]) != @sizeOf(pair[1]) or @alignOf(pair[0]) != @alignOf(pair[1])) @compileError("private C firmware wire layout differs from canonical ABI");
         for (@typeInfo(pair[0]).@"struct".fields) |field| {
             if (@offsetOf(pair[0], field.name) != @offsetOf(pair[1], field.name) or @sizeOf(field.type) != @sizeOf(@FieldType(pair[1], field.name))) @compileError("private C firmware field differs from canonical ABI");

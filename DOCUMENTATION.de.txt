@@ -1,5 +1,16 @@
-﻿ACPIPLAT / AcpiPlatform0.1.3
+﻿ACPIPLAT / AcpiPlatform0.1.4
 ============================
+0.85.31: Separater kopierter Idle-Vertrag nach _CST-/Intel-FFH-Validierung
+und genauer MADT-Zuordnung. _CSD-Abhaengigkeiten, _LPI-Kontext/Hierarchie,
+C3, generische I/O-Eintritte, fehlerhafte Daten und unvollstaendige
+CPU-Paritaet sperren tiefere Eintritte. Der Kernel qualifiziert jeden
+lokalen MWAIT-Eintritt samt ARAT/TSC, Monitor-FSM und bewaffnetem Timer.
+Notify0x81/Stop schliessen die Aufnahme und verlangen echte Austritte.
+17 zusaetzliche AML-Idlefaelle im bestehenden Integrationstest.
+SYSINFO /CPUIDLE:n bleibt passiv; Residency, Wakezeit und Energie wurden
+auf dem lokalen KVM-Gast nicht physisch gemessen. Die Firmwareangaben
+sind keine Hardwaremessungen. Einzelheiten: README.md.
+
 Rolle: externer R4D-Plattformtreiber. Kanonisches Projekt R4OSDev/r4os-driver-acpiplatform.
 Liefert standardisierte ACPI-/EC-Deckel- und Helligkeitsereignisse. Kernel-
 vertrag, Quiesce, Quellen und Grenzen: Docs/Drivers/AMDLaptop08035.txt im Docs-

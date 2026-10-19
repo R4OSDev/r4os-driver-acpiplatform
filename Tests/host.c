@@ -2,6 +2,7 @@
 #include "port.h"
 #include "fixture.h"
 #include "power.h"
+#include "idle.h"
 #include "power_pss_fixture.h"
 #include "power_cppc_fixture.h"
 #include <uacpi/acpi.h>
@@ -23,6 +24,22 @@ static unsigned deny_allocations;
 static unsigned event_waits,queue_callbacks,inject_wait_work,inject_wait_failure;
 static unsigned semaphore_creates,fail_semaphore_at;
 static unsigned power_kind,power_mode,power_writes,inject_power_stop,power_wrong_task,inject_acquire_change;
+static unsigned idle_mode,idle_pending,idle_submits,idle_busy_seen;
+static R4IdleDescriptor idle_values[2];
+static unsigned char idle_lock;
+int r4_idle_submit(const R4IdleDescriptor *v) {
+    if(!v||v->version!=1||v->size!=96||v->cpu_index>1)return -1;
+    while(__atomic_test_and_set(&idle_lock,__ATOMIC_ACQUIRE)){}
+    idle_values[v->cpu_index]=*v;__atomic_add_fetch(&idle_submits,1,__ATOMIC_RELEASE);
+    int rc=0;
+    if(v->reason==6&&__atomic_load_n(&idle_pending,__ATOMIC_ACQUIRE)){
+        __atomic_sub_fetch(&idle_pending,1,__ATOMIC_ACQ_REL);__atomic_add_fetch(&idle_busy_seen,1,__ATOMIC_RELEASE);rc=-2;}
+    __atomic_clear(&idle_lock,__ATOMIC_RELEASE);return rc;
+}
+static R4IdleDescriptor idle_snapshot(unsigned cpu) {
+    while(__atomic_test_and_set(&idle_lock,__ATOMIC_ACQUIRE)){}
+    R4IdleDescriptor v=idle_values[cpu];__atomic_clear(&idle_lock,__ATOMIC_RELEASE);return v;
+}
 static uint64_t power_token,power_next_token=1,power_worker;
 void r4_power_pause(uint64_t ms) {r4_sleep(ms);}
 int r4_power_cpu(uint32_t cpu,uint32_t *apic,uint64_t *epoch) {
@@ -147,6 +164,7 @@ static void tables(int bad_ecdt) {
     query_count=query_head=ec_command=ec_phase=ec_status=stuck=0;ready_messages=retired_messages=capabilities=lid=up=down=writes=0;
     header(&fadt,"FACP",sizeof(fadt));fadt.x_dsdt=(uintptr_t)aml_fixture;fadt.x_firmware_ctrl=(uintptr_t)&facs;fadt.sci_int=9;
     if(power_kind)fadt.x_dsdt=(uintptr_t)(power_kind==1?power_pss_fixture:power_cppc_fixture);
+    ports[0x6f1]=idle_mode;
     power_writes=power_wrong_task=inject_power_stop=0;ports[0x6f0]=power_mode;
     ports[0x700]=ports[0x710]=power_kind==1?3:20;
     ports[0x701]=ports[0x711]=200;ports[0x702]=ports[0x712]=0;ports[0x703]=ports[0x713]=128;
@@ -280,9 +298,46 @@ static int power_tests(void) {
     printf("[ACPIPLAT] firmware %u source cases: actual AML PSS/CPPC, MADT identity, SW_ALL, malformed/missing/FFH, post-admission baseline, conflict, exact return and stop in request PASS\n",cases);
     return 0;
 }
+static int idle_tests(void) {
+    unsigned cases=0;
+    for(idle_mode=0;idle_mode<17;idle_mode++) {
+        power_kind=1;power_mode=0;tables(0);idle_pending=idle_busy_seen=idle_submits=0;
+        memset(idle_values,0,sizeof(idle_values));
+        if(start()||!wait_value(&ready_messages,1,5000))goto failed;
+        R4IdleDescriptor a=idle_snapshot(0),b=idle_snapshot(1);
+        if(a.cpu_index||a.epoch!=101||b.cpu_index!=1||b.epoch!=102||a.size!=96||b.size!=96||idle_submits!=2)goto failed;
+        unsigned expected=idle_mode==0?1:idle_mode==4||idle_mode==5?5:idle_mode==7?3:idle_mode==8?4:idle_mode==15?0:2;
+        if(a.reason!=expected)goto failed;
+        if((idle_mode==7||idle_mode==8)&&b.reason!=expected)goto failed;
+        if((idle_mode==9&&b.reason!=4)||(idle_mode==10&&b.reason!=3))goto failed;
+        if(idle_mode==8&&(a.source!=2||a.state_count!=1||a.selected_index||a.cstate_type||a.entry_method||a.entry_hint||
+            a.latency_us!=30||a.min_residency_us!=100||a.context_loss!=1||a.coordination||a.declared_power_mw||a.lpi_state_count!=1))goto failed;
+        if(idle_mode==15) {
+            if(a.source!=1||a.entry_method!=1||a.entry_hint!=0x10||a.latency_us!=20||a.min_residency_us||a.coordination!=1||a.state_count!=2||!a.descriptor_identity)goto failed;
+            if(b.reason||b.entry_hint!=0x10||a.descriptor_identity==b.descriptor_identity)goto failed;
+            uacpi_namespace_node *node=0;
+            if(uacpi_namespace_node_find(uacpi_namespace_root(),"\\_SB.CPU0._PSD",&node))goto failed;
+            r4_idle_notify(node,0x81);
+            if(idle_snapshot(0).reason||idle_snapshot(1).reason)goto failed;
+            if(uacpi_namespace_node_find(uacpi_namespace_root(),"\\_SB.CPU0",&node))goto failed;
+            __atomic_store_n(&idle_pending,1,__ATOMIC_RELEASE);r4_idle_notify(node,0x81);
+            if(!wait_value(&idle_busy_seen,1,500))goto failed;
+        }
+        r4_platform_stop();r4_test_join();
+        if(allocations||power_writes||r4_platform_shutdown_status()||!retired_messages||idle_snapshot(0).reason!=6||idle_snapshot(1).reason!=6||idle_pending)goto failed;
+        cases++;
+    }
+    power_kind=power_mode=idle_mode=0;
+    printf("[ACPIPLAT] idle %u source cases: actual AML CST/CSD/LPI, identity, all-CPU parity, malformed/unsupported entry, busy Notify withdrawal and exact stop PASS\n",cases);
+    return 0;
+failed:
+    fprintf(stderr,"IDLE FAIL mode=%u reason0=%u reason1=%u submissions=%u\n",idle_mode,idle_snapshot(0).reason,idle_snapshot(1).reason,idle_submits);
+    r4_platform_stop();r4_test_join();return 1;
+}
 int r4_test(void) {
     if(queue_test())return 1;
     if(power_tests())return 1;
+    if(idle_tests())return 1;
     int result=0;tables(0);CHECK(start()==0);
     CHECK(wait_value(&ready_messages,1,5000));CHECK(wait_value(&capabilities,3,500));CHECK(wait_value(&lid,1,500));
     uacpi_u64 mode=0;CHECK(!uacpi_eval_simple_integer(0,"\\_SB.VGA0.MODE",&mode)&&mode==4);

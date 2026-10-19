@@ -3,6 +3,27 @@
 External AML namespace, embedded controller, lid and standard brightness events.
 The driver uses pinned MIT-licensed uACPI 6.1.0. It does not implement system sleep.
 
+CPU idle declarations use the separate 0.85.31 `CpuIdleDescriptor` contract.
+The existing worker validates `_CST`, Intel FFH arguments, `_CSD` dependencies
+and relevant `_LPI` declarations after exact MADT mapping. The initial entry
+candidate has C2 semantics, hardware coordination and no bus-master avoidance.
+Missing all-CPU parity, malformed objects, OS coordination, C3, generic I/O
+entry and `_LPI` context/hierarchy requirements keep deeper entry blocked.
+Only resident copied metadata reaches the kernel; no AML or module callback
+runs at idle. Notify0x81 and stop close admission and require actual in-flight
+entry exits before teardown. A changed catalogue requires restart.
+Present `_LPI` data has its own blocked source/state identity, minimum,
+wake-latency and context fields. It never inherits a `_CST` method or power
+value; descriptor fingerprints are presentation/provenance data only.
+Malformed present dependency/context descriptions also block other otherwise
+eligible entries while their coordination scope is unknown.
+
+The existing integration includes17 additional actual AML idle cases with
+malformed descriptors, parity, dependencies, context loss and a busy Notify
+withdrawal. These prove source behavior. `SYSINFO /CPUIDLE:<cpu>` distinguishes
+declarations and software attempts from unavailable hardware residency,
+wake latency and energy. Physical MWAIT behavior remains unmeasured on KVM.
+
 CPU performance uses the separate optional firmware transport added in
 0.85.30. Processor devices and legacy Processor objects are matched through
 MADT UID/APIC identities to the actual online CPU catalogue. `_CPC` supersedes

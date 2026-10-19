@@ -5,12 +5,27 @@ DefinitionBlock ("", "DSDT", 2, "R4TEST", "POWER030", 1)
 {
     OperationRegion (TCFG,SystemIO,0x6F0,1)
     Field (TCFG,ByteAcc,NoLock,Preserve) {TEST,8}
+    OperationRegion (ICFG,SystemIO,0x6F1,1)
+    Field (ICFG,ByteAcc,NoLock,Preserve) {IMOD,8}
     Scope (\_SB)
     {
         Device (CPU0)
         {
             Name (_HID, "ACPI0007")
             Name (_UID, 10)
+            If (LNotEqual(IMOD,0)) {
+                Name (_CST, Package () {2,
+                    Package () {ResourceTemplate(){Register(FFixedHW,0,0,0,0)},1,1,1000},
+                    Package () {ResourceTemplate(){Register(FFixedHW,1,2,0x10,1)},2,20,300}
+                })
+            }
+            If (LOr(LEqual(IMOD,7),LEqual(IMOD,10))) {Name (_CSD,Package(){Package(){6,0,7,0xFC,2,1}})}
+            If (LOr(LEqual(IMOD,8),LEqual(IMOD,9))) {
+                Name (_LPI,Package(){0,0,1,Package(){100,30,1,1,0,0,
+                    ResourceTemplate(){Register(FFixedHW,1,2,0x20,1)},
+                    ResourceTemplate(){Register(SystemMemory,0,0,0,0)},
+                    ResourceTemplate(){Register(SystemMemory,0,0,0,0)},"idle"}})
+            }
             Name (_PSD, Package () { Package () {5,0,7,0xFC,2} })
 #ifdef CPPCTEST
             Name (_CPC, Package () {
@@ -45,6 +60,7 @@ DefinitionBlock ("", "DSDT", 2, "R4TEST", "POWER030", 1)
         {
             Name (_HID, "ACPI0007")
             Name (_UID, 20)
+            If (LAnd(LNotEqual(IMOD,0),LNotEqual(IMOD,1))) {Alias(\_SB.CPU0._CST,_CST)}
             Name (_PSD, Package () { Package () {5,0,7,0xFC,2} })
 #ifdef CPPCTEST
             Name (_CPC, Package () {
@@ -76,8 +92,24 @@ DefinitionBlock ("", "DSDT", 2, "R4TEST", "POWER030", 1)
 #endif
         }
     }
+    If (LEqual(IMOD,16)) {
+        Scope (\_SB) {
+            Device (CPU2) {Name (_HID,"ACPI0007") Name (_UID,10) Alias(\_SB.CPU0._CST,_CST)}
+        }
+    }
     If (LEqual(TEST,1)) {Store(Zero,Index(DerefOf(Index(\_SB.CPU0._PSD,0)),4))}
     If (LEqual(TEST,2)) {Store(10,\_SB.CPU1._UID)}
+    If (LEqual(IMOD,2)) {Store(3,Index(\_SB.CPU0._CST,0))}
+    If (LEqual(IMOD,3)) {Store(0,Index(DerefOf(Index(\_SB.CPU0._CST,2)),1))}
+    If (LEqual(IMOD,4)) {Store(3,Index(DerefOf(Index(DerefOf(Index(\_SB.CPU0._CST,2)),0)),6))}
+    If (LEqual(IMOD,5)) {Store(3,Index(DerefOf(Index(\_SB.CPU0._CST,2)),1))}
+    If (LEqual(IMOD,6)) {Store(One,Index(DerefOf(Index(DerefOf(Index(\_SB.CPU0._CST,2)),0)),5))}
+    If (LEqual(IMOD,9)) {Store(2,Index(DerefOf(Index(\_SB.CPU0._LPI,3)),2))}
+    If (LEqual(IMOD,10)) {Store(5,Index(DerefOf(Index(\_SB.CPU0._CSD,0)),0))}
+    If (LEqual(IMOD,11)) {Store(One,Index(DerefOf(Index(DerefOf(Index(\_SB.CPU0._CST,2)),0)),16))}
+    If (LEqual(IMOD,12)) {Store(3,Index(DerefOf(Index(DerefOf(Index(\_SB.CPU0._CST,2)),0)),5))}
+    If (LEqual(IMOD,13)) {Store(65536,Index(DerefOf(Index(\_SB.CPU0._CST,2)),2))}
+    If (LEqual(IMOD,14)) {Store(Zero,Index(DerefOf(Index(DerefOf(Index(\_SB.CPU0._CST,2)),0)),7))}
     Name (MEM0,ResourceTemplate(){Register(SystemMemory,8,0,0x90000700,1)})
     Name (MEM1,ResourceTemplate(){Register(SystemMemory,8,0,0x90000710,1)})
 #ifdef CPPCTEST

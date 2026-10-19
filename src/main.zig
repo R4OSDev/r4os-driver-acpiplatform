@@ -12,7 +12,19 @@ var handles: [4]u64 = @splat(0);
 var started: bool = false;
 var power: ?r.r4dev.DriverCpuPowerContext = null;
 var power_cookie: u64 = 0;
+var idle_generation: std.atomic.Value(u64) = .init(0);
 extern fn r4_power_call(*const a.CpuPerformanceRequest, *a.CpuFirmwareInfo) c_int;
+export fn r4_idle_submit(input: *const a.CpuIdleDescriptor) callconv(.c) c_int {
+    // Kernel unregister already withdrew and confirmed all resident entries
+    // before zeroing this cookie. Older kernels simply retain HLT.
+    const generation = idle_generation.load(.acquire);
+    if (generation == 0) return 0;
+    const mechanism = if (power) |*v| v else return 0;
+    if (!mechanism.has("idle_publish")) return 0;
+    var value = input.*;
+    value.firmware_generation = generation;
+    return mechanism.idlePublish(&value);
+}
 extern fn r4_host_reset() c_int;
 extern fn r4_host_release() void;
 extern fn r4_host_stop() void;
@@ -44,6 +56,7 @@ export fn acpiplat_init(api: *const r.r4dev.DriverApi) callconv(.c) i32 {
                 r4_host_release();
                 return -1;
             }
+            idle_generation.store(power_cookie, .release);
         }
     }
     started = true;
@@ -70,6 +83,7 @@ export fn acpiplat_shutdown() callconv(.c) i32 {
     if (power_cookie != 0) {
         const mechanism = if (power) |*v| v else return -1;
         if (mechanism.firmwareUnregister(0, power_cookie) != 0) return -1;
+        idle_generation.store(0, .release);
         power_cookie = 0;
     }
     r4_platform_stop();

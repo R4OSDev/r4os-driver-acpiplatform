@@ -2,7 +2,7 @@ param()
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $workspace=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
-$temporary=Join-Path $workspace 'Temp/Cpu08530/Asl'
+$temporary=Join-Path $workspace 'Temp/AcpiPlatform/PowerFixtures'
 [IO.Directory]::CreateDirectory($temporary)|Out-Null
 $compiler=(Get-Command iasl -ErrorAction Stop).Source
 foreach($kind in @('pss','cppc')) {
