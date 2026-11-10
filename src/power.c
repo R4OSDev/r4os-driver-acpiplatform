@@ -287,7 +287,12 @@ static int status_match(Cpu *cpu,uint32_t control) {
     unsigned n;for(n=0;n<cpu->count;n++)if(cpu->states[n].control==control)break;
     if(n==cpu->count)return UNSUPPORTED;
     uint64_t duration=(uint64_t)cpu->states[n].latency*1000+10000000,end=r4_now()+duration;
-    do {uint32_t value;int rc=field_read(cpu->status,&value);if(rc)return rc;if(value==cpu->states[n].status)return 0;r4_sleep(1);}while(r4_now()<end);
+    R4SdkDriverPollBudget budget;r4_poll_init(&budget,(duration+999999)/1000000+32,0);
+    uint64_t previous=r4_now();
+    do {uint32_t value;int rc=field_read(cpu->status,&value);if(rc)return rc;if(value==cpu->states[n].status)return 0;
+        uint64_t now=r4_now();if(now<previous||now>=end||r4_poll_step(&budget)!=R4_POLL_PROCEED)break;
+        previous=now;r4_sleep(1);
+    }while(r4_now()<end);
     return FAULT;
 }
 static int validate_domain(Cpu *cpu,R4PowerInfo *info) {

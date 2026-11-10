@@ -1,5 +1,10 @@
-﻿ACPIPLAT / AcpiPlatform0.1.4
+﻿ACPIPLAT / AcpiPlatform0.1.6
 ============================
+0.90.50: DriverInit2/R4DEV:Query2:2; unveraenderte eigenstaendige
+Ressourcen-/Firmwaretabellen und Quittierungen. EC-/P-Statepolls erhalten
+endliche SDK-Budgets neben den bisherigen Deadlines. Stall mit stehender
+Uhr meldet einen Quellenfehler. Reale Firmware bleibt getrennt qualifiziert.
+
 0.85.31: Separater kopierter Idle-Vertrag nach _CST-/Intel-FFH-Validierung
 und genauer MADT-Zuordnung. _CSD-Abhaengigkeiten, _LPI-Kontext/Hierarchie,
 C3, generische I/O-Eintritte, fehlerhafte Daten und unvollstaendige

@@ -88,7 +88,20 @@ void uacpi_kernel_free(void *p) {r4_free(p);}
 uacpi_u64 uacpi_kernel_get_nanoseconds_since_boot(void) {return r4_now();}
 void uacpi_kernel_stall(uacpi_u8 us) {
     const uint64_t start=r4_now(), delta=(uint64_t)us*1000;
-    while(r4_now()-start<delta) __asm__ volatile("pause");
+    uint64_t previous=start;
+    R4SdkDriverPollBudget budget;r4_poll_init(&budget,1000000,1);
+    for(;;) {
+        uint64_t now=r4_now();
+        if(now<previous||r4_poll_step(&budget)!=R4_POLL_PROCEED) {
+            // Stall has no error return. Withdraw this platform source;
+            // never report a healthy timed delay when its clock is broken.
+            __atomic_store_n(&fault,1,__ATOMIC_RELEASE);
+            r4_log(UACPI_LOG_ERROR,"ACPIPLAT stall clock failed; platform source will be withdrawn");
+            return;
+        }
+        if(now-start>=delta)return;
+        previous=now;__asm__ volatile("pause");
+    }
 }
 void uacpi_kernel_sleep(uacpi_u64 ms) {r4_sleep(ms);}
 uacpi_thread_id uacpi_kernel_get_thread_id(void) {return (uacpi_thread_id)(uintptr_t)r4_thread();}

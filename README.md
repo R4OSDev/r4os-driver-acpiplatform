@@ -3,6 +3,16 @@
 External AML namespace, embedded controller, lid and standard brightness events.
 The driver uses pinned MIT-licensed uACPI 6.1.0. It does not implement system sleep.
 
+Version0.1.6 binds the actual `DriverInit2` / `R4DEV:Query2:2` table.
+Heap, resources, CPU/firmware, thread and semaphore records retain their
+independent revisions and original owner checks. Firmware unregistration,
+final AML restoration and exact worker joins still precede generic teardown.
+EC and P-state status retries use the SDK's pure finite poll budget alongside
+their original deadlines; a frozen or regressing clock cannot create an
+unbounded retry. An exhausted void Stall callback faults the platform source
+instead of declaring a healthy timed delay. Host integration includes the
+real frozen-clock Stall and EC paths; physical firmware remains unqualified.
+
 CPU idle declarations use the separate 0.85.31 `CpuIdleDescriptor` contract.
 The existing worker validates `_CST`, Intel FFH arguments, `_CSD` dependencies
 and relevant `_LPI` declarations after exact MADT mapping. The initial entry

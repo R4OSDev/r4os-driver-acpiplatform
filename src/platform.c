@@ -89,7 +89,7 @@ int r4_platform_run(void) {
     if((rc=uacpi_namespace_initialize())){r4_log(UACPI_LOG_ERROR,"ACPIPLAT namespace initialization failed");goto done;}
     r4_power_discover();
     rc=uacpi_namespace_for_each_child(uacpi_namespace_root(),discover,0,UACPI_OBJECT_DEVICE_BIT,UACPI_MAX_DEPTH_ANY,0);
-    if(rc||discovery_failure){if(!rc)rc=discovery_failure;goto done;}
+    if(rc||discovery_failure||r4_host_fault()){if(!rc)rc=discovery_failure?discovery_failure:UACPI_STATUS_INTERNAL_ERROR;goto done;}
     rc=uacpi_install_notify_handler(uacpi_namespace_root(),notify,0);if(rc)goto done;
     notify_installed=1;
     capabilities=(video_count?1:0)|(lid?2:0);

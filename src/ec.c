@@ -19,14 +19,18 @@ static unsigned count,stopping;
 static uacpi_status failure;
 
 static uacpi_status wait_status(Ec *e,unsigned mask,unsigned want,uint64_t deadline) {
+    R4SdkDriverPollBudget budget;r4_poll_init(&budget,1024,0);
+    uint64_t previous=r4_now();
     for(;;) {
         unsigned status=r4_in(e->command,1);
         if((status&mask)==want)return UACPI_STATUS_OK;
-        if(r4_now()>=deadline) {
+        uint64_t now=r4_now();
+        if(now<previous||now>=deadline||r4_poll_step(&budget)!=R4_POLL_PROCEED) {
             __atomic_store_n(&e->failed,1,__ATOMIC_RELEASE);
             r4_log(UACPI_LOG_ERROR,"ACPIPLAT EC timeout; controller retained and quarantined");
             return UACPI_STATUS_HARDWARE_TIMEOUT;
         }
+        previous=now;
         r4_sleep(1);
     }
 }

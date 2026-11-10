@@ -2,7 +2,7 @@
 const std = @import("std");
 const r = @import("r4os");
 const a = r.abi;
-var driver: r.r4dev.DriverContext = undefined;
+var driver: r.r4dev.DriverContext2 = undefined;
 var heap: r.r4dev.DriverHeapContext = undefined;
 var resources: r.r4dev.DriverResourceContext = undefined;
 var platform: r.r4dev.DriverPlatformContext = undefined;
@@ -34,12 +34,14 @@ extern fn r4_platform_shutdown_status() c_int;
 extern fn r4_platform_reset() void;
 extern fn r4_platform_stop() void;
 comptime {
-    asm (r.r4dev.driverEntriesAsm("acpiplat_init", "acpiplat_shutdown"));
+    _ = @import("poll.zig");
+    if (!@import("builtin").is_test) asm (r.r4dev.driverEntriesAsm("acpiplat_init", "acpiplat_shutdown"));
 }
 
-export fn acpiplat_init(api: *const r.r4dev.DriverApi) callconv(.c) i32 {
+export fn acpiplat_init(api: *const r.r4dev.DriverApi2) callconv(.c) i32 {
     if (started) return -1;
-    driver = r.r4dev.DriverContext.init(api);
+    driver = r.r4dev.DriverContext2.init(api);
+    if (!driver.requires(.{ "heap_query", "resource_query", "thread_query", "semaphore_query", "timer_frequency", "wait_ticks", "port_inb", "port_inw", "port_inl", "port_outb", "port_outw", "port_outl" })) return -1;
     resources = driver.resources() orelse return -1;
     platform = resources.platform() orelse return -1;
     heap = driver.heap() orelse return -1;

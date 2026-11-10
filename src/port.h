@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <uacpi/uacpi.h>
+#include <r4os/poll_budget.h>
+void r4_poll_init(R4SdkDriverPollBudget *, uint64_t, uint32_t);
+uint32_t r4_poll_step(R4SdkDriverPollBudget *);
 void *r4_alloc(size_t);
 void r4_free(void *);
 uint64_t r4_rsdp(void);

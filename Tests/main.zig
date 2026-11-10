@@ -1,10 +1,17 @@
 const std = @import("std");
 const a = @import("r4os").abi;
 const wire = @cImport({
+    @cInclude("port.h");
     @cInclude("power.h");
     @cInclude("idle.h");
 });
 comptime {
+    _ = @import("poll");
+    const Budget = @import("r4os").driver_poll_budget.DriverPollBudget;
+    if (@sizeOf(Budget) != @sizeOf(wire.R4SdkDriverPollBudget) or @alignOf(Budget) != @alignOf(wire.R4SdkDriverPollBudget)) @compileError("SDK C poll value layout differs");
+    for (@typeInfo(Budget).@"struct".fields) |field| {
+        if (@offsetOf(Budget, field.name) != @offsetOf(wire.R4SdkDriverPollBudget, field.name)) @compileError("SDK C poll field differs");
+    }
     for (.{ .{ a.CpuPerformanceRequest, wire.R4PowerRequest }, .{ a.CpuFirmwareInfo, wire.R4PowerInfo }, .{a.CpuIdleDescriptor,wire.R4IdleDescriptor} }) |pair| {
         if (@sizeOf(pair[0]) != @sizeOf(pair[1]) or @alignOf(pair[0]) != @alignOf(pair[1])) @compileError("private C firmware wire layout differs from canonical ABI");
         for (@typeInfo(pair[0]).@"struct".fields) |field| {
@@ -37,8 +44,16 @@ export fn r4_test_join() callconv(.c) void {
     };
     r4_host_release();
 }
-export fn r4_now() callconv(.c) u64 {
+var frozen_ns: std.atomic.Value(u64) = .init(0);
+export fn r4_test_wall_now() callconv(.c) u64 {
     return @intCast(std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds);
+}
+export fn r4_test_clock_freeze(enabled: u32) callconv(.c) void {
+    frozen_ns.store(if (enabled != 0) r4_test_wall_now() else 0, .release);
+}
+export fn r4_now() callconv(.c) u64 {
+    const frozen = frozen_ns.load(.acquire);
+    return if (frozen != 0) frozen else r4_test_wall_now();
 }
 export fn r4_sleep(ms: u64) callconv(.c) void {
     std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), .fromMilliseconds(@intCast(ms)), .awake) catch {};

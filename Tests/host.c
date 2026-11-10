@@ -12,13 +12,15 @@
 
 extern int r4_test_start(uint32_t);
 extern void r4_test_join(void);
+extern uint64_t r4_test_wall_now(void);
+extern void r4_test_clock_freeze(uint32_t);
 static struct acpi_rsdp root;
 static struct acpi_fadt fadt;
 static struct acpi_facs facs;
 static unsigned char xsdt[36+32],ecdt[96],mcfg[60],pci[4096],madt[60];
 static unsigned char ports[65536],ec_ram[256],query[64];
 static unsigned query_head,query_count,ec_command,ec_address,ec_phase,ec_status,ec_output;
-static unsigned stuck,allocations,capabilities,lid,up,down,writes,ready_messages,retired_messages;
+static unsigned stuck,allocations,capabilities,lid,up,down,writes,ready_messages,retired_messages,ec_timeouts;
 static unsigned char hardware_lock;
 static unsigned deny_allocations;
 static unsigned event_waits,queue_callbacks,inject_wait_work,inject_wait_failure;
@@ -74,6 +76,7 @@ void *r4_view(uint64_t p,uint64_t n) {
     return 0;
 }
 void r4_log(uint32_t level,const char *s) {
+    if(strstr(s,"EC timeout; controller retained and quarantined"))__atomic_add_fetch(&ec_timeouts,1,__ATOMIC_RELEASE);
     if(strstr(s,"namespace ready"))__atomic_add_fetch(&ready_messages,1,__ATOMIC_RELEASE);
     if(strstr(s,"callbacks quiesced"))__atomic_add_fetch(&retired_messages,1,__ATOMIC_RELEASE);
     printf("[ACPI:%u] %s\n",level,s);
@@ -93,11 +96,13 @@ int r4_acquire(uint64_t handle,uint16_t ms) {
             uacpi_kernel_schedule_work(0,counted_work,0);
         if(__atomic_exchange_n(&inject_wait_failure,0,__ATOMIC_ACQ_REL))return -1;
     }
-    uint64_t end=r4_now()+(uint64_t)ms*1000000;
+    // Kernel semaphore deadlines use scheduler ticks, independently of the
+    // resource clock injected into the firmware port by this host fixture.
+    uint64_t end=r4_test_wall_now()+(uint64_t)ms*1000000;
     for(;;) {
         unsigned value=__atomic_load_n(&s->count,__ATOMIC_ACQUIRE);
         if(value&&__atomic_compare_exchange_n(&s->count,&value,value-1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return 0;
-        if(!ms||(ms!=65535&&r4_now()>=end))return 1;
+        if(!ms||(ms!=65535&&r4_test_wall_now()>=end))return 1;
         r4_sleep(1);
     }
 }
@@ -184,8 +189,8 @@ static void tables(int bad_ecdt) {
     checksum(&root,20,8);checksum(&root,sizeof(root),32);
 }
 static int wait_value(unsigned *p,unsigned value,unsigned ms) {
-    uint64_t end=r4_now()+(uint64_t)ms*1000000;
-    while(__atomic_load_n(p,__ATOMIC_ACQUIRE)!=value){if(r4_now()>=end)return 0;r4_sleep(1);}return 1;
+    uint64_t end=r4_test_wall_now()+(uint64_t)ms*1000000;
+    while(__atomic_load_n(p,__ATOMIC_ACQUIRE)!=value){if(r4_test_wall_now()>=end)return 0;r4_sleep(1);}return 1;
 }
 static void event(unsigned value) {
     guard();query[(query_head+query_count)%64]=value;query_count++;ports[0x402]|=4;unguard();
@@ -335,6 +340,13 @@ failed:
     r4_platform_stop();r4_test_join();return 1;
 }
 int r4_test(void) {
+    // Exercise the real void uACPI callback: a frozen clock must withdraw
+    // the source instead of hanging or claiming a successful healthy delay.
+    if(r4_host_reset())return 1;
+    r4_test_clock_freeze(1);uacpi_kernel_stall(1);r4_test_clock_freeze(0);
+    if(!r4_host_fault())return 1;
+    r4_host_release();if(allocations)return 1;
+    printf("[ACPIPLAT] frozen stall clock causes bounded source withdrawal PASS\n");
     if(queue_test())return 1;
     if(power_tests())return 1;
     if(idle_tests())return 1;
@@ -355,11 +367,14 @@ int r4_test(void) {
     guard();ec_ram[0]=1;unguard();event(1);CHECK(wait_value(&lid,1,2000));
     CHECK(!r4_host_fault());printf("[ACPIPLAT] AML EC READ/WRITE/QUERY, GPE/Notify, lid, brightness filtering, _DOS and ECAM PASS\n");
     // A timed-out EC transaction cannot be replayed against a late byte.
-    guard();stuck=1;unsigned before=writes;unguard();event(1);
+    guard();stuck=1;unsigned before=writes;unguard();r4_test_clock_freeze(1);event(1);
+    CHECK(wait_value(&ec_timeouts,1,3000));
+    r4_test_clock_freeze(0);
     CHECK(wait_value(&lid,0,3000));r4_sleep(30);
     guard();unsigned after=writes;unguard();CHECK(after==before);
-    printf("[ACPIPLAT] EC timeout, no replay and lost lid source PASS\n");
+    printf("[ACPIPLAT] frozen EC clock bounded timeout, no replay and lost lid source PASS\n");
 cleanup:
+    r4_test_clock_freeze(0);
     r4_platform_stop();r4_test_join();
     if(allocations||capabilities||lid||retired_messages!=1){fprintf(stderr,"FAIL shutdown allocations=%u capabilities=%u lid=%u retired=%u\n",allocations,capabilities,lid,retired_messages);return 1;}
     if(result)return result;
