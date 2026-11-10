@@ -339,6 +339,22 @@ failed:
     fprintf(stderr,"IDLE FAIL mode=%u reason0=%u reason1=%u submissions=%u\n",idle_mode,idle_snapshot(0).reason,idle_snapshot(1).reason,idle_submits);
     r4_platform_stop();r4_test_join();return 1;
 }
+static int frozen_ec_test(void) {
+    int result=1;tables(0);if(start())return 1;
+    if(!wait_value(&ready_messages,1,5000))goto done;
+    unsigned target=__atomic_load_n(&ec_timeouts,__ATOMIC_ACQUIRE)+1;
+    guard();stuck=1;unsigned before=writes;unguard();r4_test_clock_freeze(1);event(1);
+    if(!wait_value(&ec_timeouts,target,3000))goto done;
+    r4_test_clock_freeze(0);
+    if(!wait_value(&lid,0,3000))goto done;
+    guard();unsigned after=writes;unguard();if(after!=before)goto done;
+    result=0;
+done:
+    r4_test_clock_freeze(0);r4_platform_stop();r4_test_join();
+    if(allocations||capabilities||lid||retired_messages!=1)return 1;
+    if(!result)printf("[ACPIPLAT] frozen EC clock bounded timeout, no replay and lost lid source PASS\n");
+    return result;
+}
 int r4_test(void) {
     // Exercise the real void uACPI callback: a frozen clock must withdraw
     // the source instead of hanging or claiming a successful healthy delay.
@@ -350,6 +366,7 @@ int r4_test(void) {
     if(queue_test())return 1;
     if(power_tests())return 1;
     if(idle_tests())return 1;
+    if(frozen_ec_test())return 1;
     int result=0;tables(0);CHECK(start()==0);
     CHECK(wait_value(&ready_messages,1,5000));CHECK(wait_value(&capabilities,3,500));CHECK(wait_value(&lid,1,500));
     uacpi_u64 mode=0;CHECK(!uacpi_eval_simple_integer(0,"\\_SB.VGA0.MODE",&mode)&&mode==4);
@@ -367,12 +384,10 @@ int r4_test(void) {
     guard();ec_ram[0]=1;unguard();event(1);CHECK(wait_value(&lid,1,2000));
     CHECK(!r4_host_fault());printf("[ACPIPLAT] AML EC READ/WRITE/QUERY, GPE/Notify, lid, brightness filtering, _DOS and ECAM PASS\n");
     // A timed-out EC transaction cannot be replayed against a late byte.
-    guard();stuck=1;unsigned before=writes;unguard();r4_test_clock_freeze(1);event(1);
-    CHECK(wait_value(&ec_timeouts,1,3000));
-    r4_test_clock_freeze(0);
+    guard();stuck=1;unsigned before=writes;unguard();event(1);
     CHECK(wait_value(&lid,0,3000));r4_sleep(30);
     guard();unsigned after=writes;unguard();CHECK(after==before);
-    printf("[ACPIPLAT] frozen EC clock bounded timeout, no replay and lost lid source PASS\n");
+    printf("[ACPIPLAT] EC timeout, no replay and lost lid source PASS\n");
 cleanup:
     r4_test_clock_freeze(0);
     r4_platform_stop();r4_test_join();
