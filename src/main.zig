@@ -35,7 +35,7 @@ extern fn r4_platform_reset() void;
 extern fn r4_platform_stop() void;
 comptime {
     _ = @import("poll.zig");
-    if (!@import("builtin").is_test) asm (r.r4dev.driverEntriesAsm("acpiplat_init", "acpiplat_shutdown"));
+    if (!@import("builtin").is_test) asm (r.technical2.driverEntriesAsm("acpiplat_init", "acpiplat_shutdown"));
 }
 
 export fn acpiplat_init(api: *const r.r4dev.DriverApi2) callconv(.c) i32 {
