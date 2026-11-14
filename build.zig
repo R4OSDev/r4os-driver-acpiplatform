@@ -31,6 +31,7 @@ fn addC(b: *std.Build, target: std.Build.ResolvedTarget, host: bool, sdk: anytyp
     m.addIncludePath(b.path("src"));
     m.addIncludePath(sdk.profile.c_include_root);
     m.addIncludePath(sdk.profile.contract_c_include_root);
+    m.addIncludePath(sdk.profile.contract_c_include_root2);
     m.addCSourceFiles(.{ .files = &sources, .flags = &.{ "-std=c11", "-ffreestanding", "-fno-builtin", "-fvisibility=hidden", "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "-DUACPI_DEFAULT_LOOP_TIMEOUT_SECONDS=2", "-DUACPI_DEFAULT_MAX_CALL_STACK_DEPTH=64" } });
     return m;
 }
