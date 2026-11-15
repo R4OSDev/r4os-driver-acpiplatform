@@ -17,6 +17,7 @@ static unsigned stop_workers, fault;
 static uacpi_interrupt_handler sci;
 static void *sci_context;
 static unsigned sci_active;
+static uint16_t sci_interval;
 static uint64_t lock(void) {
     uint64_t flags = r4_irq_disable();
     while (__atomic_test_and_set(&guard, __ATOMIC_ACQUIRE)) __asm__ volatile("pause");
@@ -32,7 +33,7 @@ void r4_host_release(void) {
 int r4_host_reset(void) {
     // Only before starting any task, after the previous instance was joined.
     for (unsigned i=0;i<2;i++) queues[i]=(Queue){0};
-    guard=0; sci=0; sci_context=0; sci_active=0; fault=0; stop_workers=0;
+    guard=0; sci=0; sci_context=0; sci_active=0; sci_interval=10; fault=0; stop_workers=0;
     for(unsigned i=0;i<4;i++) {
         events[i]=r4_semaphore(0,1);
         if(!events[i]){r4_host_release();return -1;}
@@ -58,12 +59,18 @@ int r4_host_worker(uint32_t kind) {
         if (kind==2) {
             if(__atomic_load_n(&stop_workers,__ATOMIC_ACQUIRE)){unlock(flags);break;}
             uacpi_interrupt_handler fn=sci; void *ctx=sci_context;
+            uint16_t interval=sci_interval;
             if (fn) sci_active++;
             unlock(flags);
-            if (fn) { fn(ctx); flags=lock(); sci_active--; unlock(flags); }
-            // No SCI IRQ transport is exposed by DriverPlatformApi. Preserve
-            // the 10-ms status/ack fallback only while a handler is installed.
-            if(r4_host_wait(2,fn?10:UINT16_MAX)<0)return -1;
+            if (fn) {
+                fn(ctx); flags=lock(); sci_active--; unlock(flags);
+                if(r4_sci_rearm()!=0) {
+                    __atomic_store_n(&fault,1,__ATOMIC_RELEASE);r4_host_stop();return -1;
+                }
+            }
+            // IRQ only wakes us. uACPI status/ACK and AML remain in task
+            // context; older kernels retain their finite 10-ms fallback.
+            if(r4_host_wait(2,fn?interval:UINT16_MAX)<0)return -1;
         } else {
             Queue *q=&queues[kind]; Work work={0};
             if(q->count) {work=q->items[q->head];q->head=(q->head+1)%256;q->count--;q->active++;}
@@ -137,9 +144,9 @@ uacpi_status uacpi_kernel_handle_firmware_request(uacpi_firmware_request *req) {
     return UACPI_STATUS_DENIED;
 }
 uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq,uacpi_interrupt_handler fn,uacpi_handle ctx,uacpi_handle *out) {
-    (void)irq;
+    uint16_t interval=r4_sci_interval(irq);
     uint64_t f=lock();if(sci){unlock(f);return UACPI_STATUS_ALREADY_EXISTS;}
-    sci=fn;sci_context=ctx;*out=&sci;unlock(f);r4_host_wake(2);return UACPI_STATUS_OK;
+    sci=fn;sci_context=ctx;sci_interval=interval;*out=&sci;unlock(f);r4_host_wake(2);return UACPI_STATUS_OK;
 }
 uacpi_status uacpi_kernel_uninstall_interrupt_handler(uacpi_interrupt_handler fn,uacpi_handle h) {
     uint64_t f=lock();

@@ -97,7 +97,7 @@ int r4_platform_run(void) {
     if(lid)sample_lid();
     __atomic_store_n(&ready,1,__ATOMIC_RELEASE);
     rc=uacpi_finalize_gpe_initialization();if(rc)goto done;
-    r4_log(UACPI_LOG_INFO,"ACPIPLAT namespace ready; qualified brightness/lid sources published; SCI polling active");
+    r4_log(UACPI_LOG_INFO,"ACPIPLAT namespace ready; qualified brightness/lid sources published; SCI worker active");
     result=0;
     uint64_t next_lid=r4_now()+1000000000;
     while((!__atomic_load_n(&stop_requested,__ATOMIC_ACQUIRE)&&!r4_host_fault())||!r4_power_idle()) {

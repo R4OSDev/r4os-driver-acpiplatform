@@ -10,6 +10,8 @@ var threads: r.r4dev.DriverThreadContext = undefined;
 var semaphores: r.r4dev.DriverSemaphoreContext = undefined;
 var handles: [4]u64 = @splat(0);
 var started: bool = false;
+var sci_line: ?u8 = null;
+var sci_pending: std.atomic.Value(bool) = .init(false);
 var power: ?r.r4dev.DriverCpuPowerContext = null;
 var power_cookie: u64 = 0;
 var idle_generation: std.atomic.Value(u64) = .init(0);
@@ -28,6 +30,7 @@ export fn r4_idle_submit(input: *const a.CpuIdleDescriptor) callconv(.c) c_int {
 extern fn r4_host_reset() c_int;
 extern fn r4_host_release() void;
 extern fn r4_host_stop() void;
+extern fn r4_host_wake(u32) void;
 extern fn r4_host_worker(u32) c_int;
 extern fn r4_platform_run() c_int;
 extern fn r4_platform_shutdown_status() c_int;
@@ -61,9 +64,10 @@ export fn acpiplat_init(api: *const r.r4dev.DriverApi2) callconv(.c) i32 {
             idle_generation.store(power_cookie, .release);
         }
     }
+    bindSci();
     started = true;
     for (0..handles.len) |i| {
-        // No parallel flag: firmware AML and the polling SCI stay on CPU0.
+        // No parallel flag: firmware AML and SCI device service stay on CPU0.
         if (threads.start(run, i, 0, &handles[i]) != 0) {
             r4_platform_stop();
             r4_host_stop();
@@ -71,7 +75,7 @@ export fn acpiplat_init(api: *const r.r4dev.DriverApi2) callconv(.c) i32 {
             return -1;
         }
     }
-    driver.logInfo("ACPIPLAT external ACPI/EC startup; SCI polling; no system suspend");
+    driver.logInfo(if (sci_line != null) "ACPIPLAT external ACPI/EC startup; SCI IRQ with 1-s fallback; no system suspend" else "ACPIPLAT external ACPI/EC startup; SCI 10-ms compatibility polling; no system suspend");
     return 0;
 }
 fn run(kind: usize) callconv(.c) i32 {
@@ -93,6 +97,9 @@ export fn acpiplat_shutdown() callconv(.c) i32 {
     // module and all callback storage; a later shutdown can join it again.
     var result: i32 = 0;
     if (handles[3] != 0 and threads.join(handles[3], ticks(5000), &result) != 0) return -1;
+    // uACPI already withdrew its SCI callback and disabled firmware events.
+    // Withdraw/drain the IRQ producer before destroying any resident event.
+    if (!unbindSci()) return -1;
     r4_host_stop();
     for (&handles) |*handle| if (handle.* != 0) {
         if (threads.join(handle.*, ticks(1000), &result) != 0 or threads.release(handle.*) != 0) return -1;
@@ -103,6 +110,53 @@ export fn acpiplat_shutdown() callconv(.c) i32 {
     if (r4_platform_shutdown_status() != 0) return -1;
     started = false;
     return 0;
+}
+fn bindSci() void {
+    sci_pending.store(false, .release);
+    sci_line = null;
+    if (!driver.requires(.{ "irq_register", "irq_unregister", "irq_rearm" }) or !resources.supportsAcpi()) return;
+    var info: a.DriverFirmwareTableInfo = .{};
+    if (resources.acpiStat("FACP".*, 0, &info) != 0 or info.byte_length < 48) return;
+    var bytes: [2]u8 = undefined;
+    const deadline = resources.nowNs() +| std.time.ns_per_s;
+    if (resources.acpiReadAt(info.handle, 46, &bytes, deadline) != bytes.len) return;
+    const line = std.mem.readInt(u16, &bytes, .little);
+    if (line >= 32 or line == 0 or line == 1 or line == 2 or line == 12) return;
+    // Init is the authenticated BSP lifecycle context. The callback may run
+    // immediately after registration; all four events are already resident.
+    sci_line = @intCast(line);
+    if (driver.irqRegister(@intCast(line), sciIrq, 0, a.irq_flag_level_low | a.irq_flag_deferred) != 0) sci_line = null;
+}
+fn sciIrq(_: u8, _: usize) callconv(.c) u32 {
+    sci_pending.store(true, .release);
+    r4_host_wake(2);
+    return a.irq_result_handled | a.irq_result_deferred;
+}
+export fn r4_sci_interval(irq: u32) callconv(.c) u16 {
+    return if (sci_line != null and sci_line.? == irq) 1000 else 10;
+}
+export fn r4_sci_rearm() callconv(.c) c_int {
+    const line = sci_line orelse return 0;
+    if (!sci_pending.swap(false, .acq_rel)) return 0;
+    const rc = driver.irqRearm(line, sciIrq, 0);
+    if (rc != 0) sci_pending.store(true, .release);
+    // A parallel caller could beat the IRQ epilogue. Keep the actual debt and
+    // retry through a finite fallback; firmware/worker execution stays on BSP.
+    return if (rc == -3) 0 else rc;
+}
+fn unbindSci() bool {
+    const line = sci_line orelse return true;
+    var rc = driver.irqUnregister(line, sciIrq, 0);
+    if (rc == -3) {
+        // After withdrawal rearm only discharges the completed masked flight;
+        // it cannot unmask the retired route. A live IRQ still returns Busy.
+        if (driver.irqRearm(line, sciIrq, 0) != 0) return false;
+        rc = driver.irqUnregister(line, sciIrq, 0);
+    }
+    if (rc != 0) return false;
+    sci_line = null;
+    sci_pending.store(false, .release);
+    return true;
 }
 fn firmware(_: usize, request: *const a.CpuPerformanceRequest, out: *a.CpuFirmwareInfo) callconv(.c) i32 {
     return r4_power_call(request, out);

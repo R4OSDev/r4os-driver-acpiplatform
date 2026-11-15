@@ -18,6 +18,8 @@ uint32_t r4_in(uint16_t, uint32_t);
 void r4_out(uint16_t, uint32_t, uint32_t);
 uint64_t r4_irq_disable(void);
 void r4_irq_restore(uint64_t);
+uint16_t r4_sci_interval(uint32_t);
+int r4_sci_rearm(void);
 uint64_t r4_semaphore(uint32_t, uint32_t);
 int r4_acquire(uint64_t, uint16_t);
 void r4_release(uint64_t);

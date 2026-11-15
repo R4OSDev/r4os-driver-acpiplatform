@@ -25,6 +25,16 @@ static unsigned char hardware_lock;
 static unsigned deny_allocations;
 static unsigned event_waits,queue_callbacks,inject_wait_work,inject_wait_failure;
 static unsigned semaphore_creates,fail_semaphore_at;
+static unsigned sci_irq_transport,sci_calls,sci_rearms,sci_rearm_failure;
+uint16_t r4_sci_interval(uint32_t irq) {return sci_irq_transport&&irq==9?1000:10;}
+int r4_sci_rearm(void) {
+    __atomic_add_fetch(&sci_rearms,1,__ATOMIC_RELEASE);
+    return __atomic_load_n(&sci_rearm_failure,__ATOMIC_ACQUIRE)?-1:0;
+}
+static uint32_t counted_sci(void *context) {
+    if(context!=&sci_calls)abort();
+    __atomic_add_fetch(&sci_calls,1,__ATOMIC_RELEASE);return 1;
+}
 static unsigned power_kind,power_mode,power_writes,inject_power_stop,power_wrong_task,inject_acquire_change;
 static unsigned idle_mode,idle_pending,idle_submits,idle_busy_seen;
 static R4IdleDescriptor idle_values[2];
@@ -192,6 +202,10 @@ static int wait_value(unsigned *p,unsigned value,unsigned ms) {
     uint64_t end=r4_test_wall_now()+(uint64_t)ms*1000000;
     while(__atomic_load_n(p,__ATOMIC_ACQUIRE)!=value){if(r4_test_wall_now()>=end)return 0;r4_sleep(1);}return 1;
 }
+static int wait_count(unsigned *p,unsigned value,unsigned ms) {
+    uint64_t end=r4_test_wall_now()+(uint64_t)ms*1000000;
+    while(__atomic_load_n(p,__ATOMIC_ACQUIRE)<value){if(r4_test_wall_now()>=end)return 0;r4_sleep(1);}return 1;
+}
 static void event(unsigned value) {
     guard();query[(query_head+query_count)%64]=value;query_count++;ports[0x402]|=4;unguard();
 }
@@ -234,7 +248,33 @@ static int queue_test(void) {
     inject_wait_failure=1;
     if(r4_test_start(0))goto failed;
     r4_test_join();if(!r4_host_fault()||allocations)return 1;
-    printf("[ACPIPLAT] queue idle/no polling, enqueue at wait, burst, stop/drain, wait failure and event OOM PASS\n");
+    // Real SCI worker body: IRQ transport must remain parked across multiple
+    // former 10-ms periods, yet a resident binary wake serves immediately.
+    sci_irq_transport=1;sci_calls=sci_rearms=sci_rearm_failure=0;
+    if(r4_host_reset())return 1;
+    uacpi_handle binding=0;
+    if(uacpi_kernel_install_interrupt_handler(9,counted_sci,&sci_calls,&binding)||r4_test_start(2))goto failed;
+    if(!wait_count(&sci_calls,1,100))goto failed;
+    r4_sleep(10);unsigned initial=sci_calls;
+    r4_sleep(80);if(sci_calls!=initial||sci_rearms!=initial)goto failed;
+    r4_host_wake(2);
+    if(!wait_count(&sci_calls,initial+1,100))goto failed;
+    if(uacpi_kernel_uninstall_interrupt_handler(counted_sci,binding))goto failed;
+    unsigned seen=sci_calls;r4_host_wake(2);r4_sleep(30);
+    if(sci_calls!=seen)goto failed;
+    r4_host_stop();r4_test_join();if(allocations)return 1;
+    // The finite 1-s fallback remains live after a lost notification. A
+    // failed rearm withdraws the source and keeps teardown responsible.
+    if(r4_host_reset())return 1;sci_calls=sci_rearms=0;
+    if(uacpi_kernel_install_interrupt_handler(9,counted_sci,&sci_calls,&binding)||r4_test_start(2))goto failed;
+    r4_sleep(20);initial=sci_calls;
+    if(!wait_count(&sci_calls,initial+1,1500))goto failed;
+    sci_rearm_failure=1;r4_host_wake(2);
+    if(!wait_count(&sci_calls,initial+2,100))goto failed;
+    r4_sleep(10);if(!r4_host_fault())goto failed;
+    r4_host_stop();r4_test_join();if(allocations)return 1;
+    sci_irq_transport=sci_rearm_failure=0;
+    printf("[ACPIPLAT] queue idle/no polling, enqueue at wait, burst, stop/drain, wait failure, event OOM, SCI IRQ wake/fallback/uninstall/rearm failure PASS\n");
     return 0;
 failed:
     r4_host_stop();r4_test_join();return 1;

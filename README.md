@@ -3,7 +3,7 @@
 External AML namespace, embedded controller, lid and standard brightness events.
 The driver uses pinned MIT-licensed uACPI 6.1.0. It does not implement system sleep.
 
-Version0.1.6 binds the actual `DriverInit2` / `R4DEV:Query2:2` table.
+Version0.1.8 binds the actual `DriverInit2` / `R4DEV:Query2:2` table.
 Heap, resources, CPU/firmware, thread and semaphore records retain their
 independent revisions and original owner checks. Firmware unregistration,
 final AML restoration and exact worker joins still precede generic teardown.
@@ -73,9 +73,13 @@ explicitly includes/loads ACPIPLAT; other profiles keep their existing selection
 Build using `./Build.sh` on Linux or `Build.bat` on Windows. Both use the shared
 PowerShell 7 SDK build. `Build.sh test` runs the bounded platform integration test.
 
-SCI status is sampled by a dedicated worker; deferred GPE and Notify callbacks
-have separate CPU0 workers. This is a polling transport, not an installed IRQ.
-Firmware operations never run under the kernel input owner.
+SCI uses the FADT's authenticated interrupt line when the optional
+`DriverApi2.irq_rearm` mechanism and an exclusive IOAPIC level route are
+available. Its resident IRQ callback only signals the binary worker event;
+the kernel masks before EOI. The dedicated CPU0 worker runs uACPI status/ACK
+and rearms the exact registration afterwards. Deferred GPE and Notify work
+retains separate CPU0 queues. Firmware operations never run in IRQ context
+or under the kernel input owner.
 
 AML and Notify workers block on resident binary semaphore events while their
 queues are empty. Stop wakes the workers, closes enqueue admission and drains
@@ -83,8 +87,13 @@ admitted work before join. Events are created before threads and released
 only after all callback producers and workers have joined. A wait failure
 withdraws the platform through the existing fault path.
 
-The installed SCI status/ack handler retains its 10-ms polling fallback because
-the platform contract has no SCI IRQ registration. Without a handler its worker
-blocks. EC GPEs wake the platform worker directly; only controllers without
+The installed SCI handler keeps a 1-second safety fallback on that IRQ route;
+older kernels or unavailable routes retain explicit 10-ms compatibility polling.
+Without a handler its worker blocks. Teardown disables firmware sources and
+joins the platform task, then withdraws/drains the IRQ before releasing events.
+An admitted IRQ or unacknowledged deferred binding keeps the module retained.
+The host integration covers idle parking, wake, finite fallback, callback
+uninstall and failed rearm; real QEMU SCI delivery is qualified separately.
+EC GPEs wake the platform worker directly; only controllers without
 GPE or with outstanding queries retain 10-ms retries. Otherwise a 1-second
 safety sample covers firmware that omits its declared event and the lid.
